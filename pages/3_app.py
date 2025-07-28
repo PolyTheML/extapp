@@ -213,7 +213,7 @@ else:
             st.header("⚙️ AI Options")
             ai_provider = st.selectbox("Choose AI Provider:", ("Google Gemini", "Anthropic Claude"))
             if ai_provider == "Google Gemini":
-                model_options = ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest"]
+                model_options = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite","gemini-1.5-flash"]
             else:
                 model_options = ["claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"]
             selected_model = st.selectbox("Choose AI Model:", options=model_options)
