@@ -69,13 +69,15 @@ if uploaded_file is not None:
                     # CRITICAL: Save images to session state for other pages to use
                     st.session_state.converted_pil_images = pil_images
                     
-                    # CRITICAL: Clear any old data from subsequent steps
-                    st.session_state.extracted_df = None
-                    st.session_state.corrected_df = None
-                    st.session_state.validation_results = None
-                    st.session_state.confidence = None
-                    st.session_state.reasoning = None
-                    st.session_state.original_df = None
+                    ### FIX: Clear ALL old data from subsequent steps to prevent using stale data
+                    keys_to_clear = [
+                        'extracted_df', 'corrected_df', 'validation_results', 
+                        'confidence', 'reasoning', 'original_df', 'corrections',
+                        'base64_image_to_validate', 'corrections_applied'
+                    ]
+                    for key in keys_to_clear:
+                        if key in st.session_state:
+                            del st.session_state[key]
 
                     st.success("✅ Conversion complete!")
                 else:
