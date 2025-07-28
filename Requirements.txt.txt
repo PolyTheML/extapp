@@ -10,5 +10,5 @@ pandas-gbq
 google-cloud-bigquery
 SQLAlchemy
 psycopg2-binary
-opencv-python
-PyMuPDF<1.24.0
+opencv-python-headless
+pymupdf
