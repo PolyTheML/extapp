@@ -1,0 +1,14 @@
+streamlit
+anthropic
+pandas
+numpy
+requests
+Pillow
+python-dotenv
+openpyxl
+pandas-gbq
+google-cloud-bigquery
+SQLAlchemy
+psycopg2-binary
+opencv-python
+PyMuPDF<1.24.0
