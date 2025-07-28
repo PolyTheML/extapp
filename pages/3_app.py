@@ -13,10 +13,7 @@ from sqlalchemy import create_engine
 import sqlite3
 import anthropic
 
-# --- Keep ALL your original functions from app.py ---
-# (prepare_image_from_upload, extract_table_with_ai, extract_table_with_claude,
-# to_excel, transform_data, and all load_to_* functions)
-# For brevity, they are pasted below.
+# --- Helper Functions ---
 
 def prepare_image_from_pil(pil_image):
     """Converts and resizes a PIL image to a base64 encoded string."""
@@ -119,6 +116,7 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
         return None, 0.0, "Extraction failed due to an API error."
 
 def to_excel(df):
+    """Converts a DataFrame to an in-memory Excel file."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
@@ -138,16 +136,17 @@ def transform_data(df: pd.DataFrame, is_for_viz=False) -> pd.DataFrame:
             
         if not pd.api.types.is_numeric_dtype(df[col]):
              try:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+                 df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
              except (ValueError, TypeError):
-                pass
-                
+                 pass
+                 
     df.replace('', np.nan, inplace=True)
     if not is_for_viz:
         st.success("Data transformation complete!")
     return df
 
 def load_to_bigquery(df: pd.DataFrame, project_id: str, table_id: str):
+    """Loads a DataFrame to Google BigQuery."""
     try:
         df.to_gbq(destination_table=table_id, project_id=project_id, if_exists='append', progress_bar=True)
         st.success(f"Successfully loaded {len(df)} rows to BigQuery table: {table_id}")
@@ -156,7 +155,7 @@ def load_to_bigquery(df: pd.DataFrame, project_id: str, table_id: str):
         st.warning("Ensure your GCP credentials are set up correctly.")
 
 def load_to_sqlite(df: pd.DataFrame, db_path: str, table_name: str):
-    """Loads the DataFrame into a specified SQLite database table using the native sqlite3 library."""
+    """Loads the DataFrame into a specified SQLite database table."""
     conn = None
     try:
         conn = sqlite3.connect(db_path)
@@ -180,7 +179,7 @@ def load_to_postgres(df: pd.DataFrame, user, password, host, port, dbname, table
     except Exception as e:
         st.error(f"Failed to load data to PostgreSQL: {e}")
         st.warning("Ensure the database and table exist and credentials are correct.")
-        
+
 # --- Main App UI ---
 load_dotenv()
 gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -188,13 +187,12 @@ anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 
 st.title("Step 2: 🔎 AI-Powered Table Extractor")
 
-# MODIFICATION: Check for images from the previous step
 if not st.session_state.get('converted_pil_images'):
     st.warning("⚠️ Please go back to the **📂 PDF Converter** page and convert a PDF first.")
 else:
     st.markdown("Select an image below to extract a table. The AI will analyze it and turn it into data.")
     
-    # MODIFICATION: Let user select which image to process
+    # Let user select which image to process
     image_options = {f"Image {i+1}": i for i in range(len(st.session_state.converted_pil_images))}
     if image_options:
         selected_image_key = st.selectbox("Choose an image to process:", options=list(image_options.keys()))
@@ -212,30 +210,32 @@ else:
         with col2:
             st.header("⚙️ AI Options")
             ai_provider = st.selectbox("Choose AI Provider:", ("Google Gemini", "Anthropic Claude"))
+            
             if ai_provider == "Google Gemini":
-                model_options = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite","gemini-1.5-flash"]
-            else:
-                model_options = ["claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"]
+                model_options = ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest"]
+            else: # Anthropic Claude
+                model_options = ["claude-3-5-sonnet-20240620", "claude-3-haiku-20240307", "claude-3-opus-20240229"]
+            
             selected_model = st.selectbox("Choose AI Model:", options=model_options)
 
             if st.button("Extract Table from Image", type="primary"):
                 api_key_to_use, extraction_function = (gemini_api_key, extract_table_with_ai) if ai_provider == "Google Gemini" else (anthropic_api_key, extract_table_with_claude)
+                
                 if not api_key_to_use:
                     st.warning(f"Please add your {ai_provider} API Key to the .env file.")
                 else:
                     with st.spinner(f"The AI ({ai_provider}) is analyzing the image with **{selected_model}**. Please wait..."):
-                        # MODIFICATION: Use the selected PIL image
                         base64_image = prepare_image_from_pil(selected_pil_image)
                         if base64_image:
                             table_data, confidence, reasoning = extraction_function(base64_image, api_key_to_use, selected_model)
                             st.session_state.confidence = confidence
                             st.session_state.reasoning = reasoning
+                            
                             if table_data and len(table_data) > 1:
                                 try:
                                     header, data = table_data[0], table_data[1:]
                                     st.session_state.extracted_df = pd.DataFrame(data, columns=header)
-                                    # Also save to original_df for the validator page
-                                    st.session_state.original_df = st.session_state.extracted_df.copy()
+                                    st.session_state.original_df = st.session_state.extracted_df.copy() # For validator page
                                     st.success("Table extracted successfully!")
                                     st.info("✅ Data is ready! Please proceed to the **🤖 Validator** page.")
                                 except Exception as e:
@@ -251,14 +251,43 @@ else:
                                 st.session_state.extracted_df = None
                                 st.session_state.original_df = None
 
-    # This part of your UI remains the same, as it depends on session state
-    if st.session_state.confidence is not None:
+    # Display extraction results and download options
+    if st.session_state.get('confidence') is not None:
         st.subheader("📊 Extraction Accuracy")
         st.metric(label="Confidence Score", value=f"{st.session_state.confidence:.1%}", delta_color="off")
         with st.expander("See AI's Reasoning"):
-            st.info(st.session_state.reasoning)
+            st.info(st.session_state.get('reasoning', 'No reasoning provided.'))
 
-    if st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
+    if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
         st.divider()
         st.subheader("Extracted Data Preview")
         st.dataframe(st.session_state.extracted_df)
+        
+        st.divider()
+        st.subheader("📥 Download Extracted Data")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            file_name = st.text_input("File Name (without extension):", value="extracted_table", key="download_filename")
+        with col2:
+            file_format = st.selectbox("Choose Format:", ["Excel (.xlsx)", "CSV (.csv)"], key="download_format")
+        
+        if file_name:
+            if file_format == "Excel (.xlsx)":
+                file_data = to_excel(st.session_state.extracted_df)
+                file_extension = "xlsx"
+                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            else:  # CSV
+                file_data = st.session_state.extracted_df.to_csv(index=False).encode('utf-8')
+                file_extension = "csv"
+                mime_type = "text/csv"
+            
+            st.download_button(
+                label=f"📥 Download as {file_format}",
+                data=file_data,
+                file_name=f"{file_name}.{file_extension}",
+                mime=mime_type,
+                type="primary"
+            )
+        else:
+            st.warning("Please enter a file name to enable download.")
