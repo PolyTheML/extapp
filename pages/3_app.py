@@ -206,7 +206,7 @@ else:
     if selected_pil_image:
         col1, col2 = st.columns(2)
         with col1:
-            st.image(selected_pil_image, caption="Selected Image for Extraction", use_column_width=True)
+            st.image(selected_pil_image, caption="Selected Image for Extraction", use_container_width=True)
         with col2:
             st.header("⚙️ AI Options")
             ai_provider = st.selectbox("Choose AI Provider:", ("Google Gemini", "Anthropic Claude"))

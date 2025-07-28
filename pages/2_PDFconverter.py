@@ -90,4 +90,4 @@ if st.session_state.get('converted_pil_images'):
     st.info("✅ Images are ready! Please proceed to the **🔎 Table Extractor** page from the sidebar.")
     # Display a preview of the generated images
     for i, img in enumerate(st.session_state.converted_pil_images):
-        st.image(img, caption=f"Page {i + 1}", use_column_width=True)
+        st.image(img, caption=f"Page {i + 1}", use_container_width=True)
