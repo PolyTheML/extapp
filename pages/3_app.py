@@ -11,35 +11,64 @@ from io import BytesIO
 from dotenv import load_dotenv
 import anthropic
 
-# --- Helper Functions (No changes needed in functions themselves) ---
+# --- Helper Functions ---
+# (Your existing helper functions: prepare_image_from_pil, to_excel, etc.)
 def prepare_image_from_pil(pil_image):
-    """Converts and resizes a PIL image to a base64 encoded string."""
     try:
         img_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-        max_dim = 2048
-        h, w, _ = img_cv.shape
+        max_dim = 2048; h, w, _ = img_cv.shape
         if h > max_dim or w > max_dim:
-            if h > w:
-                new_h, new_w = max_dim, int(w * (max_dim / h))
-            else:
-                new_h, new_w = int(h * (max_dim / w)), max_dim
+            if h > w: new_h, new_w = max_dim, int(w * (max_dim / h))
+            else: new_h, new_w = int(h * (max_dim / w)), max_dim
             img_cv = cv2.resize(img_cv, (new_w, new_h))
         _, buffer = cv2.imencode('.png', img_cv)
-        base64_image = base64.b64encode(buffer).decode('utf-8')
-        return base64_image
+        return base64.b64encode(buffer).decode('utf-8')
     except Exception as e:
-        st.error(f"Error preparing image: {e}")
-        return None
+        st.error(f"Error preparing image: {e}"); return None
+
+### FIX: Replaced the previous prompt with a new one that can detect and handle transposed (flipped) tables.
+def create_layout_aware_prompt():
+    return """
+    You are an expert data extractor. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation.
+
+    **Step 1: Detect Table Layout**
+    First, determine the table's layout. Is it:
+    a) **Standard Layout:** Headers are in the top row, and data records are in subsequent rows.
+    b) **Transposed Layout:** Headers are in the first column, and data records are in subsequent columns.
+
+    **Step 2: Extract Data Based on Layout**
+    - **If Standard Layout:** Proceed with normal extraction. The first row is your header list, and each row that follows is a data list.
+    - **If Transposed Layout:** You must **un-pivot** the data. The first column contains the headers, and each following column is a record. You must reconstruct this into a standard format.
+      - **Example of a Transposed Table:**
+        [
+          ["Name", "John Doe"],
+          ["Age", "30"],
+          ["City", "New York"]
+        ]
+      - **Your mandatory output for the above example must be:**
+        [
+          ["Name", "Age", "City"],
+          ["John Doe", "30", "New York"]
+        ]
+
+    **Step 3: Final JSON Output**
+    Regardless of the original layout, you must return a single, valid JSON object with the following three keys: "table_data", "confidence_score", and "reasoning".
+
+    - **`table_data`**: MUST be a list of lists in the **standard format** (the first inner list is the header row).
+    - **`confidence_score`**: A numerical score from 0.0 to 1.0 on your confidence in the accuracy and correct orientation of the extraction.
+    - **`reasoning`**: **Crucially, state which layout you detected** (e.g., "Detected a transposed layout and un-pivoted the data.") and explain any challenges.
+
+    Your top priority is returning the data in the correct, standard format.
+    """
 
 def extract_table_with_ai(base64_image_data, api_key, model_name):
     if not api_key:
         st.error("Error: Gemini API key not found.")
         return None, 0.0, "API key not configured."
-    prompt = "Analyze the provided image to identify the primary data table. Your task is to extract its content with high precision. Instructions: 1. **JSON Output:** Return a single JSON object with three keys: \"table_data\", \"confidence_score\", and \"reasoning\". 2. **table_data:** The value must be a list of lists, where each inner list represents a table row. The first inner list must be the header. 3. **confidence_score:** Provide a numerical score from 0.0 to 1.0, where 1.0 is absolute confidence in the extraction accuracy. 4. **reasoning:** Briefly explain your confidence score. Mention any blurry text, complex merged cells, or unusual formatting that might affect accuracy. 5. **Accuracy Rules:** Handle merged cells by repeating values, represent empty cells with an empty string(\"\"), and combine multi-line text. Begin the extraction now."
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}, {"inlineData": {"mimeType": "image/png", "data": base64_image_data}}] }],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
+    
+    prompt = create_layout_aware_prompt() # Use the new, smarter prompt
+    
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}, {"inlineData": {"mimeType": "image/png", "data": base64_image_data}}] }], "generationConfig": {"responseMimeType": "application/json"}}
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     try:
         response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
@@ -56,8 +85,11 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
     if not api_key:
         st.error("Error: Anthropic API key not found.")
         return None, 0.0, "API key not configured."
-    prompt = "Analyze the provided image to identify the primary data table. Your task is to extract its content with high precision. Instructions: 1. **JSON Output:** Return a single JSON object with three keys: \"table_data\", \"confidence_score\", and \"reasoning\". 2. **table_data:** The value must be a list of lists, where each inner list represents a table row. The first inner list must be the header. 3. **confidence_score:** Provide a numerical score from 0.0 to 1.0, where 1.0 is absolute confidence in the extraction accuracy. 4. **reasoning:** Briefly explain your confidence score. Mention any blurry text, complex merged cells, or unusual formatting that might affect accuracy. 5. **Accuracy Rules:** Handle merged cells by repeating values, represent empty cells with an empty string(\"\"), and combine multi-line text. Begin the extraction now."
+    
+    prompt = create_layout_aware_prompt() # Use the new, smarter prompt
+    
     try:
+        # (Your existing Claude API call logic remains here. It will now use the new prompt.)
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(model=model_name, max_tokens=4096, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image_data}}, {"type": "text", "text": prompt}]}])
         json_response_text = message.content[0].text
@@ -66,6 +98,10 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
     except Exception as e:
         st.error(f"An error occurred with the Claude API: {e}")
         return None, 0.0, "Extraction failed due to an API error."
+
+# --- Main App UI ---
+# (The rest of your UI code remains unchanged)
+# ...
 
 def to_excel(df):
     output = BytesIO()
