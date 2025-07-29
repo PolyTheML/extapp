@@ -142,7 +142,7 @@ else:
             
             ### FIX: Corrected and standardized model names
             if ai_provider == "Google Gemini":
-                model_options = ["gemini-1.5-flash-latest", "gemini-1.5-pro-latest"]
+                model_options = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-pro", "gemini-1.5-pro"]
             else: # Anthropic Claude
                 model_options = ["claude-3-5-sonnet-20240620", "claude-3-haiku-20240307", "claude-3-opus-20240229"]
             

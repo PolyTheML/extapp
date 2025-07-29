@@ -88,7 +88,7 @@ with col2:
 with st.sidebar:
     st.header("⚙️ Configuration")
     ai_provider = st.selectbox("Choose AI Provider:", ("Google Gemini", "Anthropic Claude"), key="validator_provider")
-    model_options = ["gemini-1.5-pro-latest"] if ai_provider == "Google Gemini" else ["claude-3-5-sonnet-20240620"]
+    model_options = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-pro", "gemini-1.5-pro"] if ai_provider == "Google Gemini" else ["claude-3-5-sonnet-20240620"]
     selected_model = st.selectbox("Choose AI Model:", options=model_options, key="validator_model")
 
 ## 2. Validation Engine
