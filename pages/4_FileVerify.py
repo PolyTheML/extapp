@@ -57,6 +57,33 @@ def apply_corrections_to_dataframe(df, corrections_dict):
             corrected_df.loc[row_idx, col_name] = info['corrected_value']
     return corrected_df
 
+def safe_df_access(df, row, col, default="N/A"):
+    """Safely access DataFrame values with error handling."""
+    try:
+        # Check if column exists
+        if col not in df.columns:
+            st.warning(f"Column '{col}' not found in DataFrame. Available columns: {list(df.columns)}")
+            return default
+        
+        # Check if row index exists
+        if row not in df.index and row >= len(df):
+            st.warning(f"Row index {row} not found in DataFrame. DataFrame has {len(df)} rows.")
+            return default
+            
+        # Try to access the value
+        if row in df.index:
+            return df.loc[row, col]
+        else:
+            # Use iloc for integer-based indexing
+            return df.iloc[row][col]
+            
+    except (KeyError, IndexError, ValueError) as e:
+        st.warning(f"Error accessing DataFrame at row {row}, column '{col}': {e}")
+        return default
+    except Exception as e:
+        st.error(f"Unexpected error accessing DataFrame: {e}")
+        return default
+
 # --- Main App UI ---
 st.set_page_config(layout="wide")
 load_dotenv()
@@ -75,6 +102,12 @@ st.markdown("Compare the original image with the extracted data, then review and
 
 original_df = st.session_state.original_df
 image_to_validate = st.session_state.converted_pil_images[st.session_state.selected_image_index]
+
+# Debug information (remove in production)
+st.sidebar.subheader("Debug Info")
+st.sidebar.write(f"DataFrame shape: {original_df.shape}")
+st.sidebar.write(f"DataFrame columns: {list(original_df.columns)}")
+st.sidebar.write(f"DataFrame index: {list(original_df.index)}")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -150,11 +183,14 @@ if 'validation_results' in st.session_state:
                 if corrections_dict:
                     corrections_data = []
                     for (row, col), info in corrections_dict.items():
+                        # Use safe DataFrame access here - this was the source of the error
+                        original_value = safe_df_access(original_df, row, col)
+                        
                         corrections_data.append({
                             "Apply": True,
                             "Row": row,
                             "Column": col,
-                            "Original Value": original_df.loc[row, col],
+                            "Original Value": original_value,
                             "Suggested Correction": info['corrected_value'],
                             "Reasoning": info['reasoning']
                         })

@@ -35,6 +35,10 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300):
         st.error(f"An error occurred during PDF processing: {e}")
         return []
 
+def rotate_image(image, angle):
+    """Rotate a PIL image by the specified angle."""
+    return image.rotate(angle, expand=True)
+
 # --- Streamlit App UI ---
 st.title("Step 1: 📂 High-Quality PDF to Image Converter")
 st.markdown("Upload a PDF to convert its pages into images for the next steps in the workflow.")
@@ -68,6 +72,8 @@ if uploaded_file is not None:
                 if pil_images:
                     # CRITICAL: Save images to session state for other pages to use
                     st.session_state.converted_pil_images = pil_images
+                    # Initialize rotation angles for each image
+                    st.session_state.image_rotations = [0] * len(pil_images)
                     
                     ### FIX: Clear ALL old data from subsequent steps to prevent using stale data
                     keys_to_clear = [
@@ -86,10 +92,47 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Failed to read the PDF file. It might be corrupted. Error: {e}")
 
-# Display images from session state
+# Display images from session state with rotation controls
 if st.session_state.get('converted_pil_images'):
     st.header("Converted Images")
-    st.info("✅ Images are ready! Please proceed to the **🔎 Table Extractor** page from the sidebar.")
-    # Display a preview of the generated images
+    st.info("✅ Images are ready! You can rotate individual images if needed, then proceed to the **🔎 Table Extractor** page from the sidebar.")
+    
+    # Initialize rotation angles if not present
+    if 'image_rotations' not in st.session_state:
+        st.session_state.image_rotations = [0] * len(st.session_state.converted_pil_images)
+    
+    # Display images with rotation controls
     for i, img in enumerate(st.session_state.converted_pil_images):
-        st.image(img, caption=f"Page {i + 1}", use_container_width=True)
+        st.subheader(f"Page {i + 1}")
+        
+        # Rotation controls
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+        
+        with col1:
+            if st.button(f"↺ 90° CCW", key=f"ccw_{i}", help="Rotate 90° counter-clockwise"):
+                st.session_state.image_rotations[i] = (st.session_state.image_rotations[i] - 90) % 360
+                st.rerun()
+        
+        with col2:
+            if st.button(f"↻ 90° CW", key=f"cw_{i}", help="Rotate 90° clockwise"):
+                st.session_state.image_rotations[i] = (st.session_state.image_rotations[i] + 90) % 360
+                st.rerun()
+        
+        with col3:
+            if st.button(f"↻ 180°", key=f"flip_{i}", help="Rotate 180°"):
+                st.session_state.image_rotations[i] = (st.session_state.image_rotations[i] + 180) % 360
+                st.rerun()
+        
+        with col4:
+            current_rotation = st.session_state.image_rotations[i]
+            if current_rotation != 0:
+                st.info(f"Current rotation: {current_rotation}°")
+        
+        # Apply rotation and display image
+        rotated_img = rotate_image(img, st.session_state.image_rotations[i])
+        st.image(rotated_img, caption=f"Page {i + 1}", use_container_width=True)
+        
+        # Update the image in session state with the rotation applied
+        st.session_state.converted_pil_images[i] = rotated_img
+        
+        st.divider()
