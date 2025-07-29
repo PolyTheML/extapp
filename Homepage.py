@@ -1,10 +1,14 @@
 import streamlit as st
+import os 
 
 st.set_page_config(
     page_title="AI Document Processor",
     page_icon="🤖",
     layout="wide"
 )
+
+if 'STREAMLIT_SERVER_FILE_WATCHER_TYPE' not in os.environ:
+    os.environ['STREAMLIT_SERVER_FILE_WATCHER_TYPE'] = 'none'
 
 st.title("Welcome to the AI Document Processor! 📄➡️📊")
 
