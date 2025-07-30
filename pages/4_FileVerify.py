@@ -6,11 +6,39 @@ import base64
 import json
 from io import BytesIO
 from dotenv import load_dotenv
+import requests
+import tempfile
+import time
+import platform
+import subprocess
 
-# --- Mock Helper Functions (for improved code structure) ---
-# In your actual app, these would contain your full AI logic for Gemini/Claude
-# The core UI and workflow improvements below do not depend on their internal code.
+# --- Windows Helper Functions ---
+def is_windows():
+    """Check if running on Windows"""
+    return platform.system().lower() == 'windows'
 
+def check_ollama_connection():
+    """Check Ollama connection and get available models"""
+    try:
+        session = requests.Session()
+        session.trust_env = False  # Avoid Windows proxy issues
+        
+        response = session.get("http://localhost:11434/api/tags", timeout=10)
+        
+        if response.status_code == 200:
+            models = response.json().get('models', [])
+            vision_models = [m['name'] for m in models 
+                           if 'vision' in m['name'].lower() or 'llava' in m['name'].lower()]
+            return True, vision_models, "Connected"
+        else:
+            return False, [], f"Server error: {response.status_code}"
+            
+    except requests.exceptions.ConnectionError:
+        return False, [], "Server not running"
+    except Exception as e:
+        return False, [], f"Connection check failed: {e}"
+
+# --- Helper Functions ---
 def prepare_image_from_pil(pil_image):
     """Converts a PIL image to a base64 string."""
     try:
@@ -22,220 +50,322 @@ def prepare_image_from_pil(pil_image):
         st.error(f"Error preparing image: {e}")
         return None
 
-def get_ai_validation(api_key, model_name, provider, base64_image, original_df):
-    """Mocks a call to an AI to get validation results."""
-    st.info(f"Pretending to call {provider} with model {model_name}...")
-    # This would be your actual API call. For this example, we return a mock response.
-    return {
-        "summary": "Found potential discrepancies in date formats and numerical values.",
-        "overall_accuracy": 0.85, "total_issues": 2,
-        "validation_results": [
-            {"row_index": 0, "column_name": "date", "image_value": "2025-07-28", "csv_value": "28/07/2025", "likely_correct_value": "2025-07-28", "confidence": 0.9, "csv_likely_correct": False, "description": "Date format mismatch.", "reasoning": "The image shows YYYY-MM-DD format."},
-            {"row_index": 1, "column_name": "amount", "image_value": "1,500.00", "csv_value": "1500.00", "likely_correct_value": "1,500.00", "confidence": 0.95, "csv_likely_correct": False, "description": "Missing thousands separator.", "reasoning": "The image clearly shows a comma as a thousands separator."}
-        ]
-    }
-
-def get_ai_corrections(api_key, model_name, provider, base64_image, issues):
-    """Mocks a call to an AI to get smart corrections."""
-    # This would be your actual API call. We return a mock response based on issues.
-    corrections_dict = {}
-    for issue in issues:
-        if not issue.get('csv_likely_correct'):
-            key = (issue.get('row_index'), issue.get('column_name'))
-            corrections_dict[key] = {
-                'corrected_value': issue.get('likely_correct_value'),
-                'confidence': issue.get('confidence'),
-                'reasoning': issue.get('reasoning')
-            }
-    return corrections_dict
-
-def apply_corrections_to_dataframe(df, corrections_dict):
-    """Applies a dictionary of corrections to a DataFrame."""
-    corrected_df = df.copy()
-    for (row_idx, col_name), info in corrections_dict.items():
-        if row_idx < len(corrected_df) and col_name in corrected_df.columns:
-            corrected_df.loc[row_idx, col_name] = info['corrected_value']
-    return corrected_df
-
-def safe_df_access(df, row, col, default="N/A"):
-    """Safely access DataFrame values with error handling."""
+def get_ai_validation_ollama(model_name, base64_image, original_df):
+    """Get validation results using Ollama"""
     try:
-        # Check if column exists
-        if col not in df.columns:
-            st.warning(f"Column '{col}' not found in DataFrame. Available columns: {list(df.columns)}")
-            return default
+        validation_prompt = f"""
+        You are an expert data validator. Compare the extracted CSV data with the original image and identify any discrepancies.
+        **CSV Data to Validate:**
+        {original_df.to_string()}
+        **Your Task:**
+        1. Carefully examine the image and compare it with the CSV data above
+        2. Look for differences in: numbers, text, dates, formatting, missing data, extra data
+        3. For each discrepancy found, determine what the correct value should be based on the image
+        **Required JSON Output:**
+        {{
+            "summary": "Brief description of findings",
+            "overall_accuracy": 0.85,
+            "total_issues": 2,
+            "validation_results": [
+                {{
+                    "row_index": 0,
+                    "column_name": "date",
+                    "image_value": "2025-07-28",
+                    "csv_value": "28/07/2025", 
+                    "likely_correct_value": "2025-07-28",
+                    "confidence": 0.9,
+                    "csv_likely_correct": false,
+                    "description": "Date format mismatch",
+                    "reasoning": "Image shows YYYY-MM-DD format"
+                }}
+            ]
+        }}
+        """
         
-        # Check if row index exists
-        if row not in df.index and row >= len(df):
-            st.warning(f"Row index {row} not found in DataFrame. DataFrame has {len(df)} rows.")
-            return default
+        # Create temp file with proper Windows handling
+        temp_dir = os.environ.get('TEMP', tempfile.gettempdir()) if is_windows() else tempfile.gettempdir()
+        
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as temp_file:
+            # Convert base64 back to image and save
+            image_data = base64.b64decode(base64_image)
+            temp_file.write(image_data)
+            temp_path = temp_file.name
+        
+        # Read and encode for Ollama
+        with open(temp_path, "rb") as image_file:
+            image_b64 = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        # Windows-specific request handling
+        session = requests.Session()
+        session.trust_env = False
+        
+        # Prepare the request payload
+        payload = {
+            "model": model_name,
+            "prompt": validation_prompt,
+            "images": [image_b64],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.9
+            }
+        }
+        
+        # Make the request
+        response = session.post(
+            "http://localhost:11434/api/generate",
+            json=payload,
+            timeout=120
+        )
+        
+        # Clean up temp file
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        
+        if response.status_code == 200:
+            result = response.json()
+            response_text = result.get('response', '')
             
-        # Try to access the value
-        if row in df.index:
-            return df.loc[row, col]
-        else:
-            # Use iloc for integer-based indexing
-            return df.iloc[row][col]
-            
-    except (KeyError, IndexError, ValueError) as e:
-        st.warning(f"Error accessing DataFrame at row {row}, column '{col}': {e}")
-        return default
-    except Exception as e:
-        st.error(f"Unexpected error accessing DataFrame: {e}")
-        return default
-
-# --- Main App UI ---
-st.set_page_config(layout="wide")
-load_dotenv()
-gemini_api_key = os.getenv("GEMINI_API_KEY")
-anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-
-st.title("Step 3: 🤖 Interactive File Validator")
-
-# Check for data from previous steps
-if 'original_df' not in st.session_state or st.session_state.original_df is None:
-    st.warning("⚠️ Please complete the previous steps first: Convert a PDF and then Extract a Table.")
-    st.stop()
-
-## 1. Configuration & Initial Display
-st.markdown("Compare the original image with the extracted data, then review and apply AI-powered corrections interactively.")
-
-original_df = st.session_state.original_df
-image_to_validate = st.session_state.converted_pil_images[st.session_state.selected_image_index]
-
-# Debug information (remove in production)
-st.sidebar.subheader("Debug Info")
-st.sidebar.write(f"DataFrame shape: {original_df.shape}")
-st.sidebar.write(f"DataFrame columns: {list(original_df.columns)}")
-st.sidebar.write(f"DataFrame index: {list(original_df.index)}")
-
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("📄 Image to Validate")
-    st.image(image_to_validate, use_container_width=True)
-with col2:
-    st.subheader("📊 Extracted Data")
-    st.dataframe(original_df.head(), use_container_width=True)
-    st.info(f"Validating **{original_df.shape[0]} rows** and **{original_df.shape[1]} columns**.")
-
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    ai_provider = st.selectbox("Choose AI Provider:", ("Google Gemini", "Anthropic Claude"), key="validator_provider")
-    model_options = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-pro", "gemini-1.5-pro"] if ai_provider == "Google Gemini" else ["claude-3-5-sonnet-20240620"]
-    selected_model = st.selectbox("Choose AI Model:", options=model_options, key="validator_model")
-
-## 2. Validation Engine
-col1, col2 = st.columns([1, 4])
-with col1:
-    if st.button("🔍 Validate Data", type="primary", use_container_width=True):
-        api_key = gemini_api_key if ai_provider == "Google Gemini" else anthropic_api_key
-        if not api_key:
-            st.error(f"Please add your {ai_provider} API key to the .env file.")
-        else:
-            with st.spinner("Preparing image and running AI validation..."):
-                base64_image = prepare_image_from_pil(image_to_validate)
-                st.session_state.base64_image_to_validate = base64_image
-                if base64_image:
-                    results = get_ai_validation(api_key, selected_model, ai_provider, base64_image, original_df)
-                    st.session_state.validation_results = results
-                    # Clear previous corrections when re-validating
-                    if 'corrections_df' in st.session_state:
-                        del st.session_state.corrections_df
-with col2:
-    if st.button("🔄 Reset Validation", use_container_width=True):
-        keys_to_clear = ['validation_results', 'corrections_df', 'corrected_df']
-        for key in keys_to_clear:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.success("Validation state has been reset.")
-        st.rerun()
-
-## 3. Interactive Correction Workflow
-if 'validation_results' in st.session_state:
-    results = st.session_state.validation_results
-    st.subheader("🔍 AI Validation Results")
-
-    # Display summary metrics
-    c1, c2, c3 = st.columns(3)
-    accuracy = results.get('overall_accuracy', 0.0)
-    c1.metric("Overall Accuracy", f"{accuracy:.1%}")
-    c2.metric("Total Issues Found", results.get('total_issues', 0))
-    status = "✅ High" if accuracy > 0.9 else "⚠️ Medium" if accuracy > 0.7 else "❌ Low"
-    c3.metric("Status", status)
-    
-    validation_issues = results.get('validation_results', [])
-    if not validation_issues:
-        st.success("🎉 No issues found! The extracted data appears to be accurate.")
-        st.session_state.corrected_df = original_df.copy()
-    else:
-        st.info(f"**AI Summary:** {results.get('summary', 'No summary provided.')}")
-        
-        # This is the new, interactive part
-        st.subheader("🔧 Review & Apply Corrections")
-        
-        # Generate the corrections dataframe if it doesn't exist
-        if 'corrections_df' not in st.session_state:
-            with st.spinner("AI is generating smart corrections..."):
-                api_key = gemini_api_key if ai_provider == "Google Gemini" else anthropic_api_key
-                base64_image = st.session_state.base64_image_to_validate
-                corrections_dict = get_ai_corrections(api_key, selected_model, ai_provider, base64_image, validation_issues)
+            # Try to extract JSON from the response
+            try:
+                # Look for JSON in the response
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}') + 1
                 
-                if corrections_dict:
-                    corrections_data = []
-                    for (row, col), info in corrections_dict.items():
-                        # Use safe DataFrame access here - this was the source of the error
-                        original_value = safe_df_access(original_df, row, col)
-                        
-                        corrections_data.append({
-                            "Apply": True,
-                            "Row": row,
-                            "Column": col,
-                            "Original Value": original_value,
-                            "Suggested Correction": info['corrected_value'],
-                            "Reasoning": info['reasoning']
-                        })
-                    st.session_state.corrections_df = pd.DataFrame(corrections_data)
+                if start_idx != -1 and end_idx > start_idx:
+                    json_text = response_text[start_idx:end_idx]
+                    validation_data = json.loads(json_text)
+                    return validation_data
                 else:
-                    st.session_state.corrections_df = pd.DataFrame() # Empty df
+                    # Fallback if no JSON found
+                    return {
+                        "summary": "Validation completed but no structured data returned",
+                        "overall_accuracy": 0.5,
+                        "total_issues": 0,
+                        "validation_results": [],
+                        "raw_response": response_text
+                    }
+            except json.JSONDecodeError:
+                return {
+                    "summary": "Error parsing validation response",
+                    "overall_accuracy": 0.0,
+                    "total_issues": 0,
+                    "validation_results": [],
+                    "raw_response": response_text
+                }
+        else:
+            return {
+                "summary": f"API Error: {response.status_code}",
+                "overall_accuracy": 0.0,
+                "total_issues": 0,
+                "validation_results": [],
+                "error": response.text
+            }
+            
+    except Exception as e:
+        return {
+            "summary": f"Validation failed: {str(e)}",
+            "overall_accuracy": 0.0,
+            "total_issues": 0,
+            "validation_results": [],
+            "error": str(e)
+        }
 
-        if not st.session_state.corrections_df.empty:
-            st.info("Review the AI's suggestions below. Edit any correction directly in the table or uncheck 'Apply' to ignore it.")
+def apply_corrections(df, validation_results):
+    """Apply corrections to the dataframe based on validation results"""
+    corrected_df = df.copy()
+    corrections_made = []
+    
+    for issue in validation_results.get('validation_results', []):
+        if not issue.get('csv_likely_correct', True):
+            row_idx = issue.get('row_index', 0)
+            col_name = issue.get('column_name', '')
+            new_value = issue.get('likely_correct_value', '')
             
-            # Use the data editor for an interactive experience
-            edited_df = st.data_editor(
-                st.session_state.corrections_df,
-                column_config={
-                    "Apply": st.column_config.CheckboxColumn(default=True),
-                    "Reasoning": st.column_config.TextColumn(width="large")
-                },
-                use_container_width=True,
-                hide_index=True,
-                key="correction_editor"
-            )
-            
-            if st.button("✅ Apply Selected Corrections", type="primary"):
-                corrections_to_apply = {}
-                for _, row in edited_df.iterrows():
-                    if row["Apply"]:
-                        corrections_to_apply[(row["Row"], row["Column"])] = {'corrected_value': row["Suggested Correction"]}
+            if col_name in corrected_df.columns and row_idx < len(corrected_df):
+                old_value = corrected_df.iloc[row_idx][col_name]
+                corrected_df.iloc[row_idx, corrected_df.columns.get_loc(col_name)] = new_value
+                corrections_made.append({
+                    'row': row_idx,
+                    'column': col_name,
+                    'old_value': old_value,
+                    'new_value': new_value,
+                    'confidence': issue.get('confidence', 0.5)
+                })
+    
+    return corrected_df, corrections_made
+
+def display_validation_results(validation_data):
+    """Display validation results in Streamlit"""
+    st.subheader("🔍 Validation Results")
+    
+    # Overall summary
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        accuracy = validation_data.get('overall_accuracy', 0.0)
+        st.metric("Overall Accuracy", f"{accuracy:.1%}")
+    
+    with col2:
+        total_issues = validation_data.get('total_issues', 0)
+        st.metric("Issues Found", total_issues)
+    
+    with col3:
+        summary = validation_data.get('summary', 'No summary available')
+        st.info(f"Summary: {summary}")
+    
+    # Detailed issues
+    validation_results = validation_data.get('validation_results', [])
+    if validation_results:
+        st.subheader("📋 Detailed Issues")
+        
+        for i, issue in enumerate(validation_results):
+            with st.expander(f"Issue {i+1}: {issue.get('description', 'Unknown issue')}"):
+                col1, col2 = st.columns(2)
                 
-                st.session_state.corrected_df = apply_corrections_to_dataframe(original_df, corrections_to_apply)
-                st.success(f"Applied {len(corrections_to_apply)} corrections successfully!")
-                st.rerun()
-
-
-## 4. Final Download
-if 'corrected_df' in st.session_state and st.session_state.corrected_df is not None:
-    st.subheader("📥 Download Validated Data")
-    st.markdown("Your data has been verified and corrected. You can now download the final version.")
+                with col1:
+                    st.write("**Details:**")
+                    st.write(f"Row: {issue.get('row_index', 'N/A')}")
+                    st.write(f"Column: {issue.get('column_name', 'N/A')}")
+                    st.write(f"Confidence: {issue.get('confidence', 0.0):.1%}")
+                
+                with col2:
+                    st.write("**Values:**")
+                    st.write(f"Image shows: `{issue.get('image_value', 'N/A')}`")
+                    st.write(f"CSV has: `{issue.get('csv_value', 'N/A')}`")
+                    st.write(f"Suggested: `{issue.get('likely_correct_value', 'N/A')}`")
+                
+                if issue.get('reasoning'):
+                    st.write(f"**Reasoning:** {issue.get('reasoning')}")
     
-    st.dataframe(st.session_state.corrected_df, use_container_width=True)
-    
-    final_csv = st.session_state.corrected_df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Download as CSV",
-        data=final_csv,
-        file_name="validated_table.csv",
-        mime="text/csv",
-        type="primary"
+    # Show raw response if available (for debugging)
+    if 'raw_response' in validation_data:
+        with st.expander("🔧 Raw AI Response (Debug)"):
+            st.text(validation_data['raw_response'])
+
+# --- Main Streamlit App ---
+def main():
+    st.set_page_config(
+        page_title="CSV Image Validator",
+        page_icon="🔍",
+        layout="wide"
     )
+    
+    st.title("🔍 CSV Image Validator")
+    st.markdown("Upload an image and CSV to validate data accuracy using AI vision models")
+    
+    # Check Ollama connection
+    st.sidebar.header("🔌 Connection Status")
+    connected, vision_models, status = check_ollama_connection()
+    
+    if connected:
+        st.sidebar.success(f"✅ Ollama: {status}")
+        if vision_models:
+            st.sidebar.success(f"Found {len(vision_models)} vision models")
+            selected_model = st.sidebar.selectbox("Select Vision Model:", vision_models)
+        else:
+            st.sidebar.warning("No vision models found")
+            st.sidebar.info("Please install a vision model like llava")
+            selected_model = None
+    else:
+        st.sidebar.error(f"❌ Ollama: {status}")
+        st.sidebar.info("Please start Ollama server")
+        selected_model = None
+    
+    # File uploads
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.header("📷 Upload Image")
+        uploaded_image = st.file_uploader(
+            "Choose an image file",
+            type=['png', 'jpg', 'jpeg'],
+            help="Upload the original image containing the data"
+        )
+        
+        if uploaded_image:
+            image = Image.open(uploaded_image)
+            st.image(image, caption="Uploaded Image", use_column_width=True)
+    
+    with col2:
+        st.header("📊 Upload CSV")
+        uploaded_csv = st.file_uploader(
+            "Choose a CSV file",
+            type=['csv'],
+            help="Upload the CSV data to validate against the image"
+        )
+        
+        if uploaded_csv:
+            df = pd.read_csv(uploaded_csv)
+            st.write("**CSV Preview:**")
+            st.dataframe(df, use_container_width=True)
+    
+    # Validation section
+    if uploaded_image and uploaded_csv and selected_model and connected:
+        st.header("🔍 AI Validation")
+        
+        if st.button("🚀 Start Validation", type="primary"):
+            with st.spinner("Validating data with AI vision model..."):
+                # Prepare image
+                base64_image = prepare_image_from_pil(image)
+                
+                if base64_image:
+                    # Get validation results
+                    validation_data = get_ai_validation_ollama(selected_model, base64_image, df)
+                    
+                    # Display results
+                    display_validation_results(validation_data)
+                    
+                    # Option to apply corrections
+                    if validation_data.get('validation_results'):
+                        st.subheader("🔧 Apply Corrections")
+                        
+                        if st.button("Apply Suggested Corrections"):
+                            corrected_df, corrections_made = apply_corrections(df, validation_data)
+                            
+                            if corrections_made:
+                                st.success(f"Applied {len(corrections_made)} corrections!")
+                                
+                                # Show corrections made
+                                st.write("**Corrections Applied:**")
+                                for correction in corrections_made:
+                                    st.write(f"Row {correction['row']}, Column '{correction['column']}': "
+                                           f"`{correction['old_value']}` → `{correction['new_value']}` "
+                                           f"(Confidence: {correction['confidence']:.1%})")
+                                
+                                # Show corrected data
+                                st.write("**Corrected CSV:**")
+                                st.dataframe(corrected_df, use_container_width=True)
+                                
+                                # Download corrected CSV
+                                csv_buffer = BytesIO()
+                                corrected_df.to_csv(csv_buffer, index=False)
+                                csv_buffer.seek(0)
+                                
+                                st.download_button(
+                                    label="📥 Download Corrected CSV",
+                                    data=csv_buffer.getvalue(),
+                                    file_name="corrected_data.csv",
+                                    mime="text/csv"
+                                )
+                            else:
+                                st.info("No corrections were applied.")
+                else:
+                    st.error("Failed to process the image")
+    
+    # Instructions
+    with st.expander("ℹ️ How to Use"):
+        st.markdown("""
+        1. **Start Ollama**: Make sure Ollama is running with a vision model (like llava)
+        2. **Upload Image**: Upload the original image containing your data
+        3. **Upload CSV**: Upload the CSV file you want to validate
+        4. **Select Model**: Choose a vision model from the sidebar
+        5. **Run Validation**: Click "Start Validation" to compare image vs CSV
+        6. **Review Results**: Check the validation results and apply corrections if needed
+        
+        **Supported Models**: llava, llava:13b, bakllava, or other vision-capable models
+        """)
+
+if __name__ == "__main__":
+    main()
