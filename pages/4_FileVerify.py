@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import requests
 import tempfile
 import time
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +25,53 @@ def prepare_image_from_pil(pil_image):
     except Exception as e:
         st.error(f"Error preparing image: {e}")
         return None
+
+def create_sample_image():
+    """Create a sample data table image for demonstration"""
+    from PIL import Image, ImageDraw, ImageFont
+    
+    # Create image
+    img = Image.new('RGB', (400, 200), color='white')
+    draw = ImageDraw.Draw(img)
+    
+    # Try to use a font, fallback to default if not available
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+    except:
+        font = ImageFont.load_default()
+    
+    # Draw table
+    data = [
+        ["Name", "Age", "City"],
+        ["John Smith", "25", "New York"],
+        ["Jane Doe", "30", "Los Angeles"],
+        ["Bob Johnson", "35", "Chicago"]
+    ]
+    
+    y_offset = 20
+    for row in data:
+        x_offset = 20
+        for cell in row:
+            draw.text((x_offset, y_offset), cell, fill='black', font=font)
+            x_offset += 100
+        y_offset += 30
+    
+    # Draw table borders
+    draw.rectangle([15, 15, 385, 135], outline='black', width=2)
+    for i in range(1, 4):
+        draw.line([15, 15 + i * 30, 385, 15 + i * 30], fill='black', width=1)
+    for i in range(1, 3):
+        draw.line([15 + i * 100, 15, 15 + i * 100, 135], fill='black', width=1)
+    
+    return img
+
+def create_sample_csv():
+    """Create sample CSV data"""
+    return pd.DataFrame({
+        'Name': ['John Smith', 'Jane Doe', 'Bob Johnson'],
+        'Age': [25, 30, 35],
+        'City': ['New York', 'Los Angeles', 'Chicago']
+    })
 
 def check_openai_connection(api_key):
     """Check OpenAI API connection"""
@@ -380,7 +428,7 @@ def main():
     )
     
     st.title("🔍 CSV Image Validator")
-    st.markdown("Upload an image and CSV to validate data accuracy using AI vision models")
+    st.markdown("Validate data accuracy by comparing images with CSV data using AI vision models")
     
     # API Configuration
     st.sidebar.header("🔑 API Configuration")
@@ -424,36 +472,183 @@ def main():
         st.sidebar.warning("⚠️ Please enter your API key")
         connected = False
     
-    # File uploads
-    col1, col2 = st.columns(2)
+    # Input method selection
+    st.header("📊 Choose Input Method")
+    input_method = st.radio(
+        "How would you like to provide your data?",
+        ["📁 Upload Files", "✍️ Input Data Directly", "🎯 Use Sample Data"],
+        horizontal=True
+    )
     
-    with col1:
-        st.header("📷 Upload Image")
-        uploaded_image = st.file_uploader(
-            "Choose an image file",
-            type=['png', 'jpg', 'jpeg'],
-            help="Upload the original image containing the data"
-        )
-        
-        if uploaded_image:
-            image = Image.open(uploaded_image)
-            st.image(image, caption="Uploaded Image", use_column_width=True)
+    image = None
+    df = None
     
-    with col2:
-        st.header("📊 Upload CSV")
-        uploaded_csv = st.file_uploader(
-            "Choose a CSV file",
-            type=['csv'],
-            help="Upload the CSV data to validate against the image"
-        )
+    if input_method == "📁 Upload Files":
+        # File uploads
+        col1, col2 = st.columns(2)
         
-        if uploaded_csv:
-            df = pd.read_csv(uploaded_csv)
-            st.write("**CSV Preview:**")
-            st.dataframe(df, use_container_width=True)
+        with col1:
+            st.subheader("📷 Upload Image")
+            uploaded_image = st.file_uploader(
+                "Choose an image file",
+                type=['png', 'jpg', 'jpeg'],
+                help="Upload the original image containing the data"
+            )
+            
+            if uploaded_image:
+                image = Image.open(uploaded_image)
+                st.image(image, caption="Uploaded Image", use_column_width=True)
+        
+        with col2:
+            st.subheader("📊 Upload CSV")
+            uploaded_csv = st.file_uploader(
+                "Choose a CSV file",
+                type=['csv'],
+                help="Upload the CSV data to validate against the image"
+            )
+            
+            if uploaded_csv:
+                df = pd.read_csv(uploaded_csv)
+                st.write("**CSV Preview:**")
+                st.dataframe(df, use_container_width=True)
+    
+    elif input_method == "✍️ Input Data Directly":
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📷 Image Input")
+            
+            # Option to upload image or take photo
+            image_input_type = st.radio(
+                "Image source:",
+                ["Upload Image", "Camera Capture"],
+                key="image_input_type"
+            )
+            
+            if image_input_type == "Upload Image":
+                uploaded_image = st.file_uploader(
+                    "Choose an image file",
+                    type=['png', 'jpg', 'jpeg'],
+                    key="direct_image_upload"
+                )
+                if uploaded_image:
+                    image = Image.open(uploaded_image)
+                    st.image(image, caption="Uploaded Image", use_column_width=True)
+            else:
+                # Camera capture
+                camera_image = st.camera_input("Take a photo of your data")
+                if camera_image:
+                    image = Image.open(camera_image)
+                    st.image(image, caption="Captured Image", use_column_width=True)
+        
+        with col2:
+            st.subheader("📊 CSV Data Input")
+            
+            # CSV input options
+            csv_input_type = st.radio(
+                "CSV input method:",
+                ["Manual Entry", "Paste CSV Text"],
+                key="csv_input_type"
+            )
+            
+            if csv_input_type == "Manual Entry":
+                st.write("**Manual Data Entry:**")
+                
+                # Dynamic table creation
+                if 'manual_data' not in st.session_state:
+                    st.session_state.manual_data = [["Column1", "Column2", "Column3"], ["", "", ""]]
+                
+                # Controls for table size
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    num_cols = st.number_input("Number of columns:", min_value=1, max_value=10, value=3)
+                with col_b:
+                    num_rows = st.number_input("Number of data rows:", min_value=1, max_value=20, value=1)
+                
+                # Adjust session state based on inputs
+                if len(st.session_state.manual_data[0]) != num_cols:
+                    # Adjust columns
+                    if num_cols > len(st.session_state.manual_data[0]):
+                        for i in range(len(st.session_state.manual_data)):
+                            st.session_state.manual_data[i].extend([""] * (num_cols - len(st.session_state.manual_data[i])))
+                    else:
+                        for i in range(len(st.session_state.manual_data)):
+                            st.session_state.manual_data[i] = st.session_state.manual_data[i][:num_cols]
+                
+                if len(st.session_state.manual_data) - 1 != num_rows:
+                    # Adjust rows (keeping header)
+                    if num_rows > len(st.session_state.manual_data) - 1:
+                        for _ in range(num_rows - (len(st.session_state.manual_data) - 1)):
+                            st.session_state.manual_data.append([""] * num_cols)
+                    else:
+                        st.session_state.manual_data = st.session_state.manual_data[:num_rows + 1]
+                
+                # Create input fields
+                for i, row in enumerate(st.session_state.manual_data):
+                    cols = st.columns(num_cols)
+                    for j in range(num_cols):
+                        with cols[j]:
+                            if i == 0:
+                                st.session_state.manual_data[i][j] = st.text_input(
+                                    f"Header {j+1}:", 
+                                    value=st.session_state.manual_data[i][j],
+                                    key=f"header_{j}"
+                                )
+                            else:
+                                st.session_state.manual_data[i][j] = st.text_input(
+                                    f"Row {i}, Col {j+1}:", 
+                                    value=st.session_state.manual_data[i][j],
+                                    key=f"data_{i}_{j}"
+                                )
+                
+                # Convert to DataFrame
+                if any(any(cell.strip() for cell in row) for row in st.session_state.manual_data):
+                    headers = st.session_state.manual_data[0]
+                    data_rows = st.session_state.manual_data[1:]
+                    df = pd.DataFrame(data_rows, columns=headers)
+                    
+                    # Clean empty rows
+                    df = df[df.apply(lambda x: x.astype(str).str.strip().ne('').any(), axis=1)]
+                    
+                    if not df.empty:
+                        st.write("**Data Preview:**")
+                        st.dataframe(df, use_container_width=True)
+            
+            else:  # Paste CSV Text
+                csv_text = st.text_area(
+                    "Paste your CSV data here:",
+                    height=200,
+                    placeholder="Name,Age,City\nJohn,25,NYC\nJane,30,LA"
+                )
+                
+                if csv_text.strip():
+                    try:
+                        from io import StringIO
+                        df = pd.read_csv(StringIO(csv_text))
+                        st.write("**Data Preview:**")
+                        st.dataframe(df, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Error parsing CSV: {e}")
+    
+    else:  # Use Sample Data
+        st.subheader("🎯 Sample Data")
+        st.info("Using sample data for demonstration. Click 'Generate Sample Data' below.")
+        
+        if st.button("Generate Sample Data"):
+            image = create_sample_image()
+            df = create_sample_csv()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Sample Image:**")
+                st.image(image, caption="Sample Data Image", use_column_width=True)
+            
+            with col2:
+                st.write("**Sample CSV:**")
+                st.dataframe(df, use_container_width=True)
     
     # Validation section
-    if uploaded_image and uploaded_csv and api_key and connected:
+    if image is not None and df is not None and api_key and connected:
         st.header("🔍 AI Validation")
         
         if st.button("🚀 Start Validation", type="primary"):
@@ -508,20 +703,46 @@ def main():
                 else:
                     st.error("Failed to process the image")
     
+    elif image is None and df is None:
+        st.info("👆 Please provide both an image and CSV data using one of the methods above.")
+    elif image is None:
+        st.info("📷 Please provide an image containing the data to validate.")
+    elif df is None:
+        st.info("📊 Please provide CSV data to validate against the image.")
+    elif not api_key:
+        st.info("🔑 Please enter your API key in the sidebar.")
+    elif not connected:
+        st.error("❌ Please check your API connection in the sidebar.")
+    
     # Instructions
     with st.expander("ℹ️ How to Use"):
         st.markdown("""
-        1. **Get API Key**: 
-           - For OpenAI: Visit https://platform.openai.com/api-keys
-           - For Anthropic: Visit https://console.anthropic.com/
-        2. **Select Provider**: Choose between OpenAI GPT-4 Vision or Anthropic Claude
-        3. **Enter API Key**: Add your API key in the sidebar
-        4. **Upload Files**: Upload both the original image and CSV file
-        5. **Run Validation**: Click "Start Validation" to compare image vs CSV
-        6. **Review Results**: Check the validation results and apply corrections if needed
+        ## Three Ways to Use This Tool:
         
-        **Note**: This uses cloud APIs, so your data will be sent to the selected provider for processing.
-        Both providers have strong privacy policies, but be aware of your data sensitivity requirements.
+        ### 1. 📁 Upload Files
+        - Upload an image file (PNG, JPG, JPEG) containing your data
+        - Upload a CSV file with the data to validate
+        
+        ### 2. ✍️ Input Data Directly  
+        - **Image**: Upload an image or use your camera to capture data
+        - **CSV**: Either manually enter data in the table or paste CSV text
+        
+        ### 3. 🎯 Use Sample Data
+        - Try the tool with built-in sample data
+        - Perfect for testing and understanding how it works
+        
+        ## API Setup:
+        - **OpenAI**: Get your API key from https://platform.openai.com/api-keys
+        - **Anthropic**: Get your API key from https://console.anthropic.com/
+        
+        ## Process:
+        1. Choose your input method
+        2. Provide image and CSV data
+        3. Enter your API key
+        4. Click "Start Validation"
+        5. Review results and apply corrections if needed
+        
+        **Note**: Your data is sent to the selected AI provider for processing.
         """)
 
 if __name__ == "__main__":
