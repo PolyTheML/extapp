@@ -11,8 +11,12 @@ import tempfile
 import time
 import numpy as np
 
-# Load environment variables
+# --- Securely Load API Keys ---
+# This loads variables from your .env file into the environment
 load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
 
 # --- Helper Functions ---
 def prepare_image_from_pil(pil_image):
@@ -269,7 +273,7 @@ def get_ai_validation_anthropic(api_key, base64_image, original_df):
         }
         
         payload = {
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-3-5-sonnet-20240620",
             "max_tokens": 2000,
             "temperature": 0.1,
             "messages": [
@@ -430,48 +434,36 @@ def main():
     st.title("🔍 CSV Image Validator")
     st.markdown("Validate data accuracy by comparing images with CSV data using AI vision models")
     
-    # API Configuration
+    # --- MODIFIED: API Configuration Sidebar ---
     st.sidebar.header("🔑 API Configuration")
     
-    # Provider selection
     provider = st.sidebar.selectbox(
         "Select AI Provider:",
         ["OpenAI (GPT-4 Vision)", "Anthropic (Claude)"]
     )
     
-    # API Key input
+    api_key = None
+    connected = False
+
     if provider == "OpenAI (GPT-4 Vision)":
-        api_key = st.sidebar.text_input(
-            "OpenAI API Key:",
-            type="password",
-            value=os.getenv("OPENAI_API_KEY", ""),
-            help="Get your API key from https://platform.openai.com/api-keys"
-        )
-    else:
-        api_key = st.sidebar.text_input(
-            "Anthropic API Key:",
-            type="password",
-            value=os.getenv("ANTHROPIC_API_KEY", ""),
-            help="Get your API key from https://console.anthropic.com/"
-        )
-    
-    # Check connection
-    st.sidebar.header("🔌 Connection Status")
-    if api_key:
-        if provider == "OpenAI (GPT-4 Vision)":
-            connected, status = check_openai_connection(api_key)
+        api_key = OPENAI_API_KEY
+        if api_key:
+            st.sidebar.success("✅ OpenAI API Key loaded.")
+            connected = True
         else:
-            # For Anthropic, we'll assume it's connected if API key is provided
-            connected, status = True, "API key provided"
-        
-        if connected:
-            st.sidebar.success(f"✅ {provider}: {status}")
+            st.sidebar.error("❌ OpenAI API Key not found.")
+            st.sidebar.info("Please add your OPENAI_API_KEY to the .env file.")
+    else: # Anthropic
+        api_key = ANTHROPIC_API_KEY
+        if api_key:
+            st.sidebar.success("✅ Anthropic API Key loaded.")
+            connected = True
         else:
-            st.sidebar.error(f"❌ {provider}: {status}")
-    else:
-        st.sidebar.warning("⚠️ Please enter your API key")
-        connected = False
-    
+            st.sidebar.error("❌ Anthropic API Key not found.")
+            st.sidebar.info("Please add your ANTHROPIC_API_KEY to the .env file.")
+            
+    # --- END OF MODIFICATION ---
+
     # Input method selection
     st.header("📊 Choose Input Method")
     input_method = st.radio(
@@ -638,6 +630,10 @@ def main():
             image = create_sample_image()
             df = create_sample_csv()
             
+            # We need to set the keys to something for the sample to work if they are not in .env
+            if not api_key:
+                st.warning("No API key found in .env. Sample data validation will not work.")
+            
             col1, col2 = st.columns(2)
             with col1:
                 st.write("**Sample Image:**")
@@ -710,9 +706,9 @@ def main():
     elif df is None:
         st.info("📊 Please provide CSV data to validate against the image.")
     elif not api_key:
-        st.info("🔑 Please enter your API key in the sidebar.")
+        st.info("🔑 Please create a .env file with your API key and restart the app.")
     elif not connected:
-        st.error("❌ Please check your API connection in the sidebar.")
+        st.error("❌ API Key not found or invalid. Please check your .env file.")
     
     # Instructions
     with st.expander("ℹ️ How to Use"):
@@ -731,18 +727,21 @@ def main():
         - Try the tool with built-in sample data
         - Perfect for testing and understanding how it works
         
-        ## API Setup:
-        - **OpenAI**: Get your API key from https://platform.openai.com/api-keys
-        - **Anthropic**: Get your API key from https://console.anthropic.com/
+        ## API Setup (Secure Method):
+        1. Create a file named `.env` in the same directory as this script.
+        2. Add your API keys to it like this:
+           ```
+           OPENAI_API_KEY="your-openai-key"
+           ANTHROPIC_API_KEY="your-anthropic-key"
+           ```
+        3. The app will automatically load these keys. **Never share your `.env` file.**
         
         ## Process:
-        1. Choose your input method
-        2. Provide image and CSV data
-        3. Enter your API key
-        4. Click "Start Validation"
-        5. Review results and apply corrections if needed
-        
-        **Note**: Your data is sent to the selected AI provider for processing.
+        1. Set up your `.env` file.
+        2. Choose your input method.
+        3. Provide image and CSV data.
+        4. Click "Start Validation".
+        5. Review results and apply corrections if needed.
         """)
 
 if __name__ == "__main__":
