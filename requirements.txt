@@ -12,3 +12,4 @@ SQLAlchemy
 psycopg2-binary
 opencv-python-headless
 pymupdf
+plotly 
