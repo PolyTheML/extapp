@@ -206,7 +206,7 @@ def to_excel_multiple_sheets(dataframes_dict):
 def get_model_options(ai_provider):
     """Get model options based on AI provider"""
     if ai_provider == "Google Gemini":
-        return ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-1.0-pro"]
+        return ["gemini-2.5-pro", "gemini-2.5-flasht", "gemini-2.0-pro"]
     elif ai_provider == "Anthropic Claude":
         return ["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"]
     else:
