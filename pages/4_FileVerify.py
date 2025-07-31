@@ -9,34 +9,9 @@ from dotenv import load_dotenv
 import requests
 import tempfile
 import time
-import platform
-import subprocess
 
-# --- Windows Helper Functions ---
-def is_windows():
-    """Check if running on Windows"""
-    return platform.system().lower() == 'windows'
-
-def check_ollama_connection():
-    """Check Ollama connection and get available models"""
-    try:
-        session = requests.Session()
-        session.trust_env = False  # Avoid Windows proxy issues
-        
-        response = session.get("http://localhost:11434/api/tags", timeout=10)
-        
-        if response.status_code == 200:
-            models = response.json().get('models', [])
-            vision_models = [m['name'] for m in models 
-                           if 'vision' in m['name'].lower() or 'llava' in m['name'].lower()]
-            return True, vision_models, "Connected"
-        else:
-            return False, [], f"Server error: {response.status_code}"
-            
-    except requests.exceptions.ConnectionError:
-        return False, [], "Server not running"
-    except Exception as e:
-        return False, [], f"Connection check failed: {e}"
+# Load environment variables
+load_dotenv()
 
 # --- Helper Functions ---
 def prepare_image_from_pil(pil_image):
@@ -50,17 +25,50 @@ def prepare_image_from_pil(pil_image):
         st.error(f"Error preparing image: {e}")
         return None
 
-def get_ai_validation_ollama(model_name, base64_image, original_df):
-    """Get validation results using Ollama"""
+def check_openai_connection(api_key):
+    """Check OpenAI API connection"""
+    if not api_key:
+        return False, "API key not provided"
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Test with a simple models list request
+        response = requests.get(
+            "https://api.openai.com/v1/models",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            return True, "Connected to OpenAI API"
+        elif response.status_code == 401:
+            return False, "Invalid API key"
+        else:
+            return False, f"API Error: {response.status_code}"
+            
+    except requests.exceptions.ConnectionError:
+        return False, "Network connection failed"
+    except Exception as e:
+        return False, f"Connection check failed: {e}"
+
+def get_ai_validation_openai(api_key, base64_image, original_df):
+    """Get validation results using OpenAI GPT-4 Vision"""
     try:
         validation_prompt = f"""
         You are an expert data validator. Compare the extracted CSV data with the original image and identify any discrepancies.
+        
         **CSV Data to Validate:**
         {original_df.to_string()}
+        
         **Your Task:**
         1. Carefully examine the image and compare it with the CSV data above
         2. Look for differences in: numbers, text, dates, formatting, missing data, extra data
         3. For each discrepancy found, determine what the correct value should be based on the image
+        
         **Required JSON Output:**
         {{
             "summary": "Brief description of findings",
@@ -80,53 +88,48 @@ def get_ai_validation_ollama(model_name, base64_image, original_df):
                 }}
             ]
         }}
+        
+        Please respond ONLY with valid JSON.
         """
         
-        # Create temp file with proper Windows handling
-        temp_dir = os.environ.get('TEMP', tempfile.gettempdir()) if is_windows() else tempfile.gettempdir()
-        
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as temp_file:
-            # Convert base64 back to image and save
-            image_data = base64.b64decode(base64_image)
-            temp_file.write(image_data)
-            temp_path = temp_file.name
-        
-        # Read and encode for Ollama
-        with open(temp_path, "rb") as image_file:
-            image_b64 = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        # Windows-specific request handling
-        session = requests.Session()
-        session.trust_env = False
-        
-        # Prepare the request payload
-        payload = {
-            "model": model_name,
-            "prompt": validation_prompt,
-            "images": [image_b64],
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "top_p": 0.9
-            }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
         }
         
-        # Make the request
-        response = session.post(
-            "http://localhost:11434/api/generate",
+        payload = {
+            "model": "gpt-4o",  # GPT-4 with vision capabilities
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": validation_prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 2000,
+            "temperature": 0.1
+        }
+        
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
             json=payload,
             timeout=120
         )
         
-        # Clean up temp file
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
-        
         if response.status_code == 200:
             result = response.json()
-            response_text = result.get('response', '')
+            response_text = result['choices'][0]['message']['content']
             
             # Try to extract JSON from the response
             try:
@@ -156,12 +159,136 @@ def get_ai_validation_ollama(model_name, base64_image, original_df):
                     "raw_response": response_text
                 }
         else:
+            error_data = response.json() if response.content else {"error": "Unknown error"}
             return {
                 "summary": f"API Error: {response.status_code}",
                 "overall_accuracy": 0.0,
                 "total_issues": 0,
                 "validation_results": [],
-                "error": response.text
+                "error": error_data.get("error", {}).get("message", str(error_data))
+            }
+            
+    except Exception as e:
+        return {
+            "summary": f"Validation failed: {str(e)}",
+            "overall_accuracy": 0.0,
+            "total_issues": 0,
+            "validation_results": [],
+            "error": str(e)
+        }
+
+def get_ai_validation_anthropic(api_key, base64_image, original_df):
+    """Get validation results using Anthropic Claude"""
+    try:
+        validation_prompt = f"""
+        You are an expert data validator. Compare the extracted CSV data with the original image and identify any discrepancies.
+        
+        **CSV Data to Validate:**
+        {original_df.to_string()}
+        
+        **Your Task:**
+        1. Carefully examine the image and compare it with the CSV data above
+        2. Look for differences in: numbers, text, dates, formatting, missing data, extra data
+        3. For each discrepancy found, determine what the correct value should be based on the image
+        
+        **Required JSON Output:**
+        {{
+            "summary": "Brief description of findings",
+            "overall_accuracy": 0.85,
+            "total_issues": 2,
+            "validation_results": [
+                {{
+                    "row_index": 0,
+                    "column_name": "date",
+                    "image_value": "2025-07-28",
+                    "csv_value": "28/07/2025", 
+                    "likely_correct_value": "2025-07-28",
+                    "confidence": 0.9,
+                    "csv_likely_correct": false,
+                    "description": "Date format mismatch",
+                    "reasoning": "Image shows YYYY-MM-DD format"
+                }}
+            ]
+        }}
+        
+        Please respond ONLY with valid JSON.
+        """
+        
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01"
+        }
+        
+        payload = {
+            "model": "claude-3-5-sonnet-20241022",
+            "max_tokens": 2000,
+            "temperature": 0.1,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64_image
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": validation_prompt
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            response_text = result['content'][0]['text']
+            
+            # Try to extract JSON from the response
+            try:
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}') + 1
+                
+                if start_idx != -1 and end_idx > start_idx:
+                    json_text = response_text[start_idx:end_idx]
+                    validation_data = json.loads(json_text)
+                    return validation_data
+                else:
+                    return {
+                        "summary": "Validation completed but no structured data returned",
+                        "overall_accuracy": 0.5,
+                        "total_issues": 0,
+                        "validation_results": [],
+                        "raw_response": response_text
+                    }
+            except json.JSONDecodeError:
+                return {
+                    "summary": "Error parsing validation response",
+                    "overall_accuracy": 0.0,
+                    "total_issues": 0,
+                    "validation_results": [],
+                    "raw_response": response_text
+                }
+        else:
+            error_data = response.json() if response.content else {"error": "Unknown error"}
+            return {
+                "summary": f"API Error: {response.status_code}",
+                "overall_accuracy": 0.0,
+                "total_issues": 0,
+                "validation_results": [],
+                "error": str(error_data)
             }
             
     except Exception as e:
@@ -255,23 +382,47 @@ def main():
     st.title("🔍 CSV Image Validator")
     st.markdown("Upload an image and CSV to validate data accuracy using AI vision models")
     
-    # Check Ollama connection
-    st.sidebar.header("🔌 Connection Status")
-    connected, vision_models, status = check_ollama_connection()
+    # API Configuration
+    st.sidebar.header("🔑 API Configuration")
     
-    if connected:
-        st.sidebar.success(f"✅ Ollama: {status}")
-        if vision_models:
-            st.sidebar.success(f"Found {len(vision_models)} vision models")
-            selected_model = st.sidebar.selectbox("Select Vision Model:", vision_models)
-        else:
-            st.sidebar.warning("No vision models found")
-            st.sidebar.info("Please install a vision model like llava")
-            selected_model = None
+    # Provider selection
+    provider = st.sidebar.selectbox(
+        "Select AI Provider:",
+        ["OpenAI (GPT-4 Vision)", "Anthropic (Claude)"]
+    )
+    
+    # API Key input
+    if provider == "OpenAI (GPT-4 Vision)":
+        api_key = st.sidebar.text_input(
+            "OpenAI API Key:",
+            type="password",
+            value=os.getenv("OPENAI_API_KEY", ""),
+            help="Get your API key from https://platform.openai.com/api-keys"
+        )
     else:
-        st.sidebar.error(f"❌ Ollama: {status}")
-        st.sidebar.info("Please start Ollama server")
-        selected_model = None
+        api_key = st.sidebar.text_input(
+            "Anthropic API Key:",
+            type="password",
+            value=os.getenv("ANTHROPIC_API_KEY", ""),
+            help="Get your API key from https://console.anthropic.com/"
+        )
+    
+    # Check connection
+    st.sidebar.header("🔌 Connection Status")
+    if api_key:
+        if provider == "OpenAI (GPT-4 Vision)":
+            connected, status = check_openai_connection(api_key)
+        else:
+            # For Anthropic, we'll assume it's connected if API key is provided
+            connected, status = True, "API key provided"
+        
+        if connected:
+            st.sidebar.success(f"✅ {provider}: {status}")
+        else:
+            st.sidebar.error(f"❌ {provider}: {status}")
+    else:
+        st.sidebar.warning("⚠️ Please enter your API key")
+        connected = False
     
     # File uploads
     col1, col2 = st.columns(2)
@@ -302,17 +453,20 @@ def main():
             st.dataframe(df, use_container_width=True)
     
     # Validation section
-    if uploaded_image and uploaded_csv and selected_model and connected:
+    if uploaded_image and uploaded_csv and api_key and connected:
         st.header("🔍 AI Validation")
         
         if st.button("🚀 Start Validation", type="primary"):
-            with st.spinner("Validating data with AI vision model..."):
+            with st.spinner(f"Validating data with {provider}..."):
                 # Prepare image
                 base64_image = prepare_image_from_pil(image)
                 
                 if base64_image:
-                    # Get validation results
-                    validation_data = get_ai_validation_ollama(selected_model, base64_image, df)
+                    # Get validation results based on provider
+                    if provider == "OpenAI (GPT-4 Vision)":
+                        validation_data = get_ai_validation_openai(api_key, base64_image, df)
+                    else:
+                        validation_data = get_ai_validation_anthropic(api_key, base64_image, df)
                     
                     # Display results
                     display_validation_results(validation_data)
@@ -357,14 +511,17 @@ def main():
     # Instructions
     with st.expander("ℹ️ How to Use"):
         st.markdown("""
-        1. **Start Ollama**: Make sure Ollama is running with a vision model (like llava)
-        2. **Upload Image**: Upload the original image containing your data
-        3. **Upload CSV**: Upload the CSV file you want to validate
-        4. **Select Model**: Choose a vision model from the sidebar
+        1. **Get API Key**: 
+           - For OpenAI: Visit https://platform.openai.com/api-keys
+           - For Anthropic: Visit https://console.anthropic.com/
+        2. **Select Provider**: Choose between OpenAI GPT-4 Vision or Anthropic Claude
+        3. **Enter API Key**: Add your API key in the sidebar
+        4. **Upload Files**: Upload both the original image and CSV file
         5. **Run Validation**: Click "Start Validation" to compare image vs CSV
         6. **Review Results**: Check the validation results and apply corrections if needed
         
-        **Supported Models**: llava, llava:13b, bakllava, or other vision-capable models
+        **Note**: This uses cloud APIs, so your data will be sent to the selected provider for processing.
+        Both providers have strong privacy policies, but be aware of your data sensitivity requirements.
         """)
 
 if __name__ == "__main__":

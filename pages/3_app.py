@@ -10,96 +10,10 @@ import json
 from io import BytesIO
 from dotenv import load_dotenv
 import anthropic
-import tempfile
 import time
-import platform
-import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- Windows Helper Functions ---
-def is_windows():
-    """Check if running on Windows"""
-    return platform.system().lower() == 'windows'
-
-def check_ollama_installation():
-    """Check if Ollama is installed"""
-    try:
-        if is_windows():
-            result = subprocess.run(['where', 'ollama'], 
-                                  capture_output=True, text=True, shell=True)
-            return result.returncode == 0
-        else:
-            result = subprocess.run(['which', 'ollama'], 
-                                  capture_output=True, text=True)
-            return result.returncode == 0
-    except:
-        return False
-
-def start_ollama_server():
-    """Start Ollama server if not running"""
-    try:
-        if is_windows():
-            # Check if ollama is already running
-            tasklist = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq ollama.exe'], 
-                                    capture_output=True, text=True, shell=True)
-            
-            if 'ollama.exe' not in tasklist.stdout:
-                subprocess.Popen(['ollama', 'serve'], 
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-                time.sleep(10)
-                return True
-            else:
-                return True
-        else:
-            try:
-                subprocess.run(['pgrep', 'ollama'], check=True, capture_output=True)
-                return True
-            except subprocess.CalledProcessError:
-                subprocess.Popen(['ollama', 'serve'])
-                time.sleep(10)
-                return True
-    except Exception as e:
-        st.error(f"Failed to start Ollama server: {e}")
-        return False
-
-def check_ollama_connection():
-    """Check Ollama connection and get available models"""
-    try:
-        if not check_ollama_installation():
-            return False, [], "Ollama not installed"
-        
-        session = requests.Session()
-        session.trust_env = False  # Avoid Windows proxy issues
-        
-        response = session.get("http://localhost:11434/api/tags", timeout=10)
-        
-        if response.status_code == 200:
-            models = response.json().get('models', [])
-            vision_models = [m['name'] for m in models 
-                           if 'vision' in m['name'].lower() or 'llava' in m['name'].lower()]
-            return True, vision_models, "Connected"
-        else:
-            return False, [], f"Server error: {response.status_code}"
-            
-    except requests.exceptions.ConnectionError:
-        if start_ollama_server():
-            time.sleep(5)
-            try:
-                response = requests.get("http://localhost:11434/api/tags", timeout=10)
-                if response.status_code == 200:
-                    models = response.json().get('models', [])
-                    vision_models = [m['name'] for m in models 
-                                   if 'vision' in m['name'].lower() or 'llava' in m['name'].lower()]
-                    return True, vision_models, "Started and connected"
-                else:
-                    return False, [], "Server started but not responding"
-            except:
-                return False, [], "Failed to start server"
-        else:
-            return False, [], "Server not running and failed to start"
-    except Exception as e:
-        return False, [], f"Connection check failed: {e}"
-
-# --- Existing Helper Functions ---
+# --- Helper Functions ---
 def prepare_image_from_pil(pil_image):
     try:
         img_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
@@ -148,118 +62,8 @@ def create_layout_aware_prompt():
     """
 
 # --- AI Extraction Functions ---
-def extract_table_with_ollama(pil_image, model_name="llama3.2-vision:11b"):
-    """Extract table using Llama Vision via Ollama - Windows optimized"""
-    try:
-        # Create temp file with proper Windows handling
-        temp_dir = os.environ.get('TEMP', tempfile.gettempdir()) if is_windows() else tempfile.gettempdir()
-        
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as temp_file:
-            pil_image.save(temp_file.name, format='PNG', optimize=False, quality=100)
-            temp_path = temp_file.name
-        
-        # Convert image to base64
-        with open(temp_path, "rb") as image_file:
-            image_data = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        prompt = create_layout_aware_prompt()
-        
-        # Windows-specific request handling
-        session = requests.Session()
-        session.trust_env = False
-        
-        payload = {
-            "model": model_name,
-            "prompt": prompt,
-            "images": [image_data],
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0.1,
-                "top_p": 0.9,
-                "num_ctx": 4096,
-                "num_predict": 4096
-            }
-        }
-        
-        # Make request with retries
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = session.post(
-                    "http://localhost:11434/api/generate",
-                    json=payload,
-                    timeout=600,  # 10 minutes timeout
-                    headers={'Content-Type': 'application/json'}
-                )
-                
-                if response.status_code == 200:
-                    break
-                else:
-                    if attempt == max_retries - 1:
-                        raise Exception(f"HTTP {response.status_code}: {response.text}")
-                    time.sleep(5)
-                    
-            except requests.exceptions.Timeout:
-                if attempt == max_retries - 1:
-                    raise Exception("Request timed out. The image might be too complex.")
-                time.sleep(10)
-            except requests.exceptions.ConnectionError:
-                if attempt == max_retries - 1:
-                    raise Exception("Cannot connect to Ollama. Make sure it's running.")
-                time.sleep(5)
-        
-        # Clean up temp file
-        try:
-            os.unlink(temp_path)
-        except (PermissionError, FileNotFoundError):
-            pass  # Windows sometimes locks files
-        
-        if response.status_code == 200:
-            result = response.json()
-            response_text = result.get('response', '{}')
-            
-            try:
-                # Clean up response text if needed
-                if not response_text.strip().startswith('{'):
-                    start = response_text.find('{')
-                    end = response_text.rfind('}') + 1
-                    if start != -1 and end != 0:
-                        response_text = response_text[start:end]
-                
-                parsed_data = json.loads(response_text)
-                
-                return (
-                    parsed_data.get("table_data", []), 
-                    parsed_data.get("confidence_score", 0.0), 
-                    parsed_data.get("reasoning", "No reasoning provided.")
-                )
-                
-            except json.JSONDecodeError as e:
-                st.error(f"Failed to parse Ollama response as JSON: {e}")
-                st.error(f"Raw response (first 500 chars): {response_text[:500]}")
-                return None, 0.0, "JSON parsing failed"
-        else:
-            raise Exception(f"HTTP {response.status_code}: {response.text}")
-            
-    except requests.exceptions.ConnectionError:
-        st.error("❌ Cannot connect to Ollama server.")
-        st.error("Please ensure Ollama is running. Try:")
-        st.code("ollama serve")
-        return None, 0.0, "Connection failed - Ollama not running"
-        
-    except requests.exceptions.Timeout:
-        st.error("⏱️ Request timed out. The image might be too complex.")
-        st.info("💡 Try using a smaller model like 'llava:13b'.")
-        return None, 0.0, "Request timed out"
-        
-    except Exception as e:
-        st.error(f"❌ Ollama extraction failed: {e}")
-        return None, 0.0, f"Extraction failed: {str(e)}"
-
-def extract_table_with_ai(base64_image_data, api_key, model_name):
+def extract_table_with_gemini(base64_image_data, api_key, model_name):
     if not api_key:
-        st.error("Error: Gemini API key not found.")
         return None, 0.0, "API key not configured."
     
     prompt = create_layout_aware_prompt()
@@ -274,12 +78,10 @@ def extract_table_with_ai(base64_image_data, api_key, model_name):
         parsed_json = json.loads(json_response_text)
         return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
     except Exception as e:
-        st.error(f"An error occurred during Gemini extraction: {e}")
-        return None, 0.0, "Extraction failed due to a general error."
+        return None, 0.0, f"Extraction failed: {str(e)}"
 
 def extract_table_with_claude(base64_image_data, api_key, model_name):
     if not api_key:
-        st.error("Error: Anthropic API key not found.")
         return None, 0.0, "API key not configured."
     
     prompt = create_layout_aware_prompt()
@@ -291,13 +93,110 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
         parsed_json = json.loads(json_response_text)
         return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
     except Exception as e:
-        st.error(f"An error occurred with the Claude API: {e}")
-        return None, 0.0, "Extraction failed due to an API error."
+        return None, 0.0, f"API error: {str(e)}"
+
+# --- Batch Processing Functions ---
+def process_single_image(args):
+    """Process a single image - used for batch processing"""
+    image_index, pil_image, ai_provider, selected_model, api_key = args
+    
+    try:
+        base64_image = prepare_image_from_pil(pil_image)
+        if not base64_image:
+            return {
+                'index': image_index,
+                'success': False,
+                'error': 'Failed to prepare image',
+                'table_data': None,
+                'confidence': 0.0,
+                'reasoning': 'Image preparation failed'
+            }
+        
+        if ai_provider == "Google Gemini":
+            table_data, confidence, reasoning = extract_table_with_gemini(base64_image, api_key, selected_model)
+        elif ai_provider == "Anthropic Claude":
+            table_data, confidence, reasoning = extract_table_with_claude(base64_image, api_key, selected_model)
+        else:
+            return {
+                'index': image_index,
+                'success': False,
+                'error': 'Unsupported AI provider',
+                'table_data': None,
+                'confidence': 0.0,
+                'reasoning': 'Invalid provider'
+            }
+        
+        # Process the extracted data
+        df = None
+        if table_data and len(table_data) > 1:
+            try:
+                header, data = table_data[0], table_data[1:]
+                df = pd.DataFrame(data, columns=header)
+            except Exception as e:
+                # Try without header if there's a mismatch
+                df = pd.DataFrame(table_data)
+        elif table_data:
+            df = pd.DataFrame(table_data)
+        
+        return {
+            'index': image_index,
+            'success': df is not None and not df.empty,
+            'error': None if df is not None else 'No table data extracted',
+            'table_data': table_data,
+            'dataframe': df,
+            'confidence': confidence,
+            'reasoning': reasoning
+        }
+        
+    except Exception as e:
+        return {
+            'index': image_index,
+            'success': False,
+            'error': str(e),
+            'table_data': None,
+            'dataframe': None,
+            'confidence': 0.0,
+            'reasoning': f'Processing failed: {str(e)}'
+        }
+
+def batch_extract_tables(images, ai_provider, selected_model, api_key, max_workers=3):
+    """Extract tables from multiple images in parallel"""
+    # Prepare arguments for each image
+    args_list = [
+        (i, img, ai_provider, selected_model, api_key) 
+        for i, img in enumerate(images)
+    ]
+    
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(process_single_image, args): args[0] 
+            for args in args_list
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_index):
+            result = future.result()
+            results.append(result)
+    
+    # Sort results by original image index
+    results.sort(key=lambda x: x['index'])
+    return results
 
 def to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
+
+def to_excel_multiple_sheets(dataframes_dict):
+    """Create Excel file with multiple sheets"""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for sheet_name, df in dataframes_dict.items():
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
     return output.getvalue()
 
 def get_model_options(ai_provider):
@@ -306,47 +205,8 @@ def get_model_options(ai_provider):
         return ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-pro", "gemini-1.5-pro"]
     elif ai_provider == "Anthropic Claude":
         return ["claude-3-5-sonnet-20240620", "claude-3-haiku-20240307", "claude-3-opus-20240229"]
-    elif ai_provider == "Llama (Ollama)":
-        is_connected, available_models, _ = check_ollama_connection()
-        if is_connected and available_models:
-            return available_models
-        else:
-            return ["llama3.2-vision:11b", "llama3.2-vision:90b", "llava:13b"]
     else:
         return []
-
-def install_ollama_model(model_name):
-    """Install an Ollama model with progress"""
-    try:
-        if is_windows():
-            process = subprocess.Popen(
-                ['ollama', 'pull', model_name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            
-            progress_placeholder = st.empty()
-            output_lines = []
-            
-            for line in process.stdout:
-                output_lines.append(line.strip())
-                if len(output_lines) > 10:
-                    output_lines = output_lines[-10:]
-                
-                progress_placeholder.text("Downloading...\n" + "\n".join(output_lines))
-            
-            process.wait()
-            return process.returncode == 0
-        else:
-            result = subprocess.run(['ollama', 'pull', model_name], 
-                                  capture_output=True, text=True)
-            return result.returncode == 0
-            
-    except Exception as e:
-        st.error(f"Failed to install model: {e}")
-        return False
 
 # --- Main App UI ---
 load_dotenv()
@@ -358,169 +218,333 @@ st.title("Step 2: 🔎 AI-Powered Table Extractor")
 if not st.session_state.get('converted_pil_images'):
     st.warning("⚠️ Please go back to the **📂 PDF Converter** page and convert a PDF first.")
 else:
-    st.markdown("Select an image below to extract a table. The AI will analyze it and turn it into data.")
+    st.markdown("Choose to extract tables from individual images or process all images at once.")
     
-    image_options = {f"Image {i+1}": i for i in range(len(st.session_state.converted_pil_images))}
-    if image_options:
-        selected_image_key = st.selectbox("Choose an image to process:", options=list(image_options.keys()))
-        selected_image_index = image_options[selected_image_key]
-        st.session_state.selected_image_index = selected_image_index
-        selected_pil_image = st.session_state.converted_pil_images[selected_image_index]
-    else:
-        st.error("No images found from the conversion step.")
-        selected_pil_image = None
-
-    if selected_pil_image:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(selected_pil_image, caption="Selected Image for Extraction", use_container_width=True)
-        with col2:
-            st.header("⚙️ AI Options")
-            ai_provider = st.selectbox("Choose AI Provider:", (
-                "Google Gemini", 
-                "Anthropic Claude", 
-                "Llama (Ollama)"
-            ))
+    # Processing mode selection
+    processing_mode = st.radio(
+        "**Processing Mode:**",
+        ["Single Image", "Batch Process All Images"],
+        horizontal=True
+    )
+    
+    # AI Configuration (shared for both modes)
+    st.header("⚙️ AI Configuration")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        ai_provider = st.selectbox("Choose AI Provider:", (
+            "Google Gemini", 
+            "Anthropic Claude"
+        ))
+    
+    with col2:
+        model_options = get_model_options(ai_provider)
+        selected_model = st.selectbox("Choose AI Model:", options=model_options)
+    
+    st.divider()
+    
+    # Single Image Mode
+    if processing_mode == "Single Image":
+        st.header("🖼️ Single Image Processing")
+        
+        image_options = {f"Image {i+1}": i for i in range(len(st.session_state.converted_pil_images))}
+        if image_options:
+            selected_image_key = st.selectbox("Choose an image to process:", options=list(image_options.keys()))
+            selected_image_index = image_options[selected_image_key]
+            st.session_state.selected_image_index = selected_image_index
+            selected_pil_image = st.session_state.converted_pil_images[selected_image_index]
             
-            model_options = get_model_options(ai_provider)
-            selected_model = st.selectbox("Choose AI Model:", options=model_options)
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.image(selected_pil_image, caption="Selected Image for Extraction", use_container_width=True)
             
-            # Ollama-specific status and controls
-            if ai_provider == "Llama (Ollama)":
-                is_connected, available_models, status_msg = check_ollama_connection()
-                
-                if is_connected:
-                    st.success(f"✅ Ollama: {status_msg}")
-                    if available_models:
-                        st.info(f"📋 Available vision models: {len(available_models)}")
-                    else:
-                        st.warning("⚠️ No vision models found")
-                        
-                        # Quick install options
-                        st.markdown("**Quick Install:**")
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            if st.button("📥 Install llama3.2-vision:11b", help="Recommended model"):
-                                with st.spinner("Installing model... This may take several minutes."):
-                                    if install_ollama_model("llama3.2-vision:11b"):
-                                        st.success("✅ Model installed!")
-                                        st.rerun()
-                                    else:
-                                        st.error("❌ Installation failed")
-                        
-                        with col_b:
-                            if st.button("📥 Install llava:13b", help="Smaller, faster model"):
-                                with st.spinner("Installing model... This may take several minutes."):
-                                    if install_ollama_model("llava:13b"):
-                                        st.success("✅ Model installed!")
-                                        st.rerun()
-                                    else:
-                                        st.error("❌ Installation failed")
-                else:
-                    st.error(f"❌ Ollama: {status_msg}")
+            with col2:
+                if st.button("Extract Table from Image", type="primary"):
+                    # Check API key
+                    if ai_provider == "Google Gemini":
+                        api_key_to_use = gemini_api_key
+                        extraction_function = extract_table_with_gemini
+                    elif ai_provider == "Anthropic Claude":
+                        api_key_to_use = anthropic_api_key
+                        extraction_function = extract_table_with_claude
                     
-                    with st.expander("🔧 Windows Setup Help"):
-                        st.markdown("""
-                        **If Ollama is not working:**
-                        
-                        1. **Install Ollama:**
-                           - Download: https://ollama.ai/download/windows
-                           - Or use: `winget install Ollama.Ollama`
-                        
-                        2. **Start Ollama:**
-                           ```
-                           ollama serve
-                           ```
-                        
-                        3. **Check Windows Firewall** and allow Ollama
-                        
-                        4. **Restart PowerShell** after installation
-                        """)
-
-            if st.button("Extract Table from Image", type="primary"):
-                # Determine extraction function and API key
-                if ai_provider == "Google Gemini":
-                    api_key_to_use = gemini_api_key
-                    extraction_function = extract_table_with_ai
-                elif ai_provider == "Anthropic Claude":
-                    api_key_to_use = anthropic_api_key
-                    extraction_function = extract_table_with_claude
-                elif ai_provider == "Llama (Ollama)":
-                    api_key_to_use = None
-                    extraction_function = lambda img, key, model: extract_table_with_ollama(selected_pil_image, model)
-                
-                # Check requirements
-                if ai_provider in ["Google Gemini", "Anthropic Claude"] and not api_key_to_use:
-                    st.warning(f"Please add your {ai_provider} API Key to the .env file.")
-                elif ai_provider == "Llama (Ollama)" and not check_ollama_connection()[0]:
-                    st.error("Ollama is not running. Please start it with: `ollama serve`")
-                else:
-                    with st.spinner(f"🦙 {ai_provider} is analyzing the image with **{selected_model}**. Please wait..."):
-                        start_time = time.time()
-                        
-                        if ai_provider == "Llama (Ollama)":
-                            table_data, confidence, reasoning = extraction_function(None, None, selected_model)
-                        else:
+                    if not api_key_to_use:
+                        st.warning(f"Please add your {ai_provider} API Key to the .env file.")
+                    else:
+                        with st.spinner(f"🤖 {ai_provider} is analyzing the image with **{selected_model}**. Please wait..."):
+                            start_time = time.time()
+                            
                             base64_image = prepare_image_from_pil(selected_pil_image)
                             if base64_image:
                                 table_data, confidence, reasoning = extraction_function(base64_image, api_key_to_use, selected_model)
                             else:
                                 table_data, confidence, reasoning = None, 0.0, "Failed to prepare image"
-                        
-                        processing_time = time.time() - start_time
-                        
-                        # Store results
-                        st.session_state.confidence = confidence
-                        st.session_state.reasoning = reasoning
-                        
-                        if table_data and len(table_data) > 1:
-                            try:
-                                header, data = table_data[0], table_data[1:]
-                                st.session_state.extracted_df = pd.DataFrame(data, columns=header)
-                                st.session_state.original_df = st.session_state.extracted_df.copy()
-                                st.success(f"✅ Table extracted successfully in {processing_time:.1f} seconds!")
-                                st.info("✅ Data is ready! Please proceed to the **🤖 Validator** page.")
-                            except Exception as e:
-                                st.error(f"Data Mismatch Error: {e}. Trying to load without a header.")
+                            
+                            processing_time = time.time() - start_time
+                            
+                            # Store results
+                            st.session_state.confidence = confidence
+                            st.session_state.reasoning = reasoning
+                            
+                            if table_data and len(table_data) > 1:
+                                try:
+                                    header, data = table_data[0], table_data[1:]
+                                    st.session_state.extracted_df = pd.DataFrame(data, columns=header)
+                                    st.session_state.original_df = st.session_state.extracted_df.copy()
+                                    st.success(f"✅ Table extracted successfully in {processing_time:.1f} seconds!")
+                                    st.info("✅ Data is ready! Please proceed to the **🤖 Validator** page.")
+                                except Exception as e:
+                                    st.error(f"Data Mismatch Error: {e}. Trying to load without a header.")
+                                    st.session_state.extracted_df = pd.DataFrame(table_data)
+                                    st.session_state.original_df = st.session_state.extracted_df.copy()
+                            elif table_data:
+                                st.warning("Only one row of data was extracted.")
                                 st.session_state.extracted_df = pd.DataFrame(table_data)
                                 st.session_state.original_df = st.session_state.extracted_df.copy()
-                        elif table_data:
-                            st.warning("Only one row of data was extracted.")
-                            st.session_state.extracted_df = pd.DataFrame(table_data)
-                            st.session_state.original_df = st.session_state.extracted_df.copy()
-                        else:
-                            st.error("The AI could not find a table in the image.")
-                            st.session_state.extracted_df = None
-                            st.session_state.original_df = None
+                            else:
+                                st.error("The AI could not find a table in the image.")
+                                st.session_state.extracted_df = None
+                                st.session_state.original_df = None
+    
+    # Batch Processing Mode
+    else:
+        st.header("🚀 Batch Processing All Images")
+        
+        total_images = len(st.session_state.converted_pil_images)
+        st.info(f"Ready to process **{total_images}** images with **{ai_provider}** using **{selected_model}**")
+        
+        # Batch processing options
+        col1, col2 = st.columns(2)
+        with col1:
+            batch_max_workers = st.slider(
+                "Parallel Workers:", 
+                min_value=1, 
+                max_value=5,
+                value=3,
+                help="Number of parallel processes for faster processing."
+            )
+        
+        with col2:
+            estimated_cost = total_images * 0.05  # Rough estimate
+            st.warning(f"💰 Estimated API cost: ~${estimated_cost:.2f}")
+        
+        # Preview images
+        with st.expander("🖼️ Preview Images to Process"):
+            cols = st.columns(min(4, total_images))
+            for i, img in enumerate(st.session_state.converted_pil_images[:8]):  # Show first 8
+                with cols[i % 4]:
+                    st.image(img, caption=f"Image {i+1}", use_container_width=True)
+            if total_images > 8:
+                st.info(f"... and {total_images - 8} more images")
+        
+        if st.button("🚀 Start Batch Processing", type="primary", use_container_width=True):
+            # Check API key
+            api_key_to_use = gemini_api_key if ai_provider == "Google Gemini" else anthropic_api_key
+            if not api_key_to_use:
+                st.error(f"Please add your {ai_provider} API Key to the .env file.")
+                st.stop()
+            
+            # Start batch processing
+            start_time = time.time()
+            
+            # Progress tracking
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_container = st.container()
+            
+            with st.spinner(f"Processing {total_images} images with {ai_provider}..."):
+                # Run batch extraction
+                results = batch_extract_tables(
+                    st.session_state.converted_pil_images,
+                    ai_provider,
+                    selected_model,
+                    api_key_to_use,
+                    batch_max_workers
+                )
+                
+                # Update progress
+                progress_bar.progress(1.0)
+                processing_time = time.time() - start_time
+                
+                # Analyze results
+                successful_extractions = [r for r in results if r['success']]
+                failed_extractions = [r for r in results if not r['success']]
+                
+                # Display summary
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Processed", total_images)
+                with col2:
+                    st.metric("Successful", len(successful_extractions))
+                with col3:
+                    st.metric("Failed", len(failed_extractions))
+                with col4:
+                    st.metric("Processing Time", f"{processing_time:.1f}s")
+                
+                if successful_extractions:
+                    st.success(f"✅ Successfully extracted {len(successful_extractions)} tables!")
+                    
+                    # Store batch results in session state
+                    st.session_state.batch_results = results
+                    st.session_state.batch_dataframes = {
+                        f"Image_{r['index']+1}": r['dataframe'] 
+                        for r in successful_extractions if r['dataframe'] is not None
+                    }
+                    
+                    # Show detailed results
+                    with st.expander("📊 Detailed Results", expanded=True):
+                        for result in results:
+                            col1, col2, col3 = st.columns([1, 2, 1])
+                            
+                            with col1:
+                                st.image(
+                                    st.session_state.converted_pil_images[result['index']], 
+                                    caption=f"Image {result['index']+1}",
+                                    width=150
+                                )
+                            
+                            with col2:
+                                if result['success']:
+                                    st.success(f"✅ **Image {result['index']+1}** - Table extracted")
+                                    if result['dataframe'] is not None:
+                                        st.write(f"**Rows:** {len(result['dataframe'])}, **Columns:** {len(result['dataframe'].columns)}")
+                                        st.write(f"**Confidence:** {result['confidence']:.1%}")
+                                        
+                                        # Show preview of extracted data with toggle button
+                                        preview_key = f"show_preview_{result['index']}"
+                                        if preview_key not in st.session_state:
+                                            st.session_state[preview_key] = False
+                                        
+                                        if st.button(f"👁️ {'Hide' if st.session_state[preview_key] else 'Show'} Preview", 
+                                                   key=f"preview_btn_{result['index']}", 
+                                                   help="Click to show/hide data preview"):
+                                            st.session_state[preview_key] = not st.session_state[preview_key]
+                                        
+                                        if st.session_state[preview_key]:
+                                            st.dataframe(result['dataframe'].head(), use_container_width=True)
+                                else:
+                                    st.error(f"❌ **Image {result['index']+1}** - Failed")
+                                    st.write(f"**Error:** {result['error']}")
+                            
+                            with col3:
+                                if result['success'] and result['dataframe'] is not None:
+                                    # Individual download buttons
+                                    csv_data = result['dataframe'].to_csv(index=False).encode('utf-8')
+                                    st.download_button(
+                                        label="📥 CSV",
+                                        data=csv_data,
+                                        file_name=f"image_{result['index']+1}_table.csv",
+                                        mime="text/csv",
+                                        key=f"csv_{result['index']}"
+                                    )
+                                    
+                                    excel_data = to_excel(result['dataframe'])
+                                    st.download_button(
+                                        label="📥 Excel",
+                                        data=excel_data,
+                                        file_name=f"image_{result['index']+1}_table.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        key=f"excel_{result['index']}"
+                                    )
+                    
+                    # Bulk download options
+                    st.divider()
+                    st.subheader("📦 Bulk Download Options")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**📋 Individual CSV Files (ZIP)**")
+                        if st.button("📥 Download All CSVs as ZIP", use_container_width=True):
+                            import zipfile
+                            zip_buffer = BytesIO()
+                            
+                            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                                for result in successful_extractions:
+                                    if result['dataframe'] is not None:
+                                        csv_data = result['dataframe'].to_csv(index=False)
+                                        zip_file.writestr(
+                                            f"image_{result['index']+1}_table.csv", 
+                                            csv_data
+                                        )
+                            
+                            st.download_button(
+                                label="📥 Download ZIP File",
+                                data=zip_buffer.getvalue(),
+                                file_name="all_extracted_tables.zip",
+                                mime="application/zip"
+                            )
+                    
+                    with col2:
+                        st.markdown("**📊 Combined Excel File (Multiple Sheets)**")
+                        if st.button("📥 Create Combined Excel File", use_container_width=True):
+                            if st.session_state.batch_dataframes:
+                                combined_excel = to_excel_multiple_sheets(st.session_state.batch_dataframes)
+                                st.download_button(
+                                    label="📥 Download Combined Excel",
+                                    data=combined_excel,
+                                    file_name="all_tables_combined.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
+                
+                if failed_extractions:
+                    st.warning(f"⚠️ {len(failed_extractions)} images failed to process")
+                    
+                    with st.expander("❌ Failed Extractions"):
+                        for result in failed_extractions:
+                            st.error(f"**Image {result['index']+1}:** {result['error']}")
+                
+                # Option to retry failed extractions
+                if failed_extractions:
+                    st.divider()
+                    if st.button("🔄 Retry Failed Extractions", type="secondary"):
+                        failed_images = [(r['index'], st.session_state.converted_pil_images[r['index']]) for r in failed_extractions]
+                        
+                        with st.spinner(f"Retrying {len(failed_images)} failed extractions..."):
+                            retry_args = [
+                                (idx, img, ai_provider, selected_model, api_key_to_use)
+                                for idx, img in failed_images
+                            ]
+                            
+                            retry_results = []
+                            for args in retry_args:
+                                result = process_single_image(args)
+                                retry_results.append(result)
+                            
+                            # Update original results
+                            for retry_result in retry_results:
+                                for i, original_result in enumerate(st.session_state.batch_results):
+                                    if original_result['index'] == retry_result['index']:
+                                        st.session_state.batch_results[i] = retry_result
+                                        break
+                            
+                            st.rerun()
 
-    # Results Display
-    if st.session_state.get('confidence') is not None:
+    # Display single image results
+    if processing_mode == "Single Image" and st.session_state.get('confidence') is not None:
         st.subheader("📊 Extraction Results")
         
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric(label="Confidence Score", value=f"{st.session_state.confidence:.1%}")
         with col2:
-            if ai_provider == "Llama (Ollama)":
+            if 'processing_time' in locals():
                 st.metric(label="Processing Time", value=f"{processing_time:.1f}s")
         with col3:
-            if ai_provider == "Llama (Ollama)":
-                st.metric(label="Model", value=selected_model.split(':')[0])
+            st.metric(label="AI Provider", value=ai_provider)
         
         with st.expander("🧠 AI's Reasoning"):
             st.info(st.session_state.get('reasoning', 'No reasoning provided.'))
             
-            if ai_provider == "Llama (Ollama)":
-                st.markdown(f"""
-                **Model Info:**
-                - **Model:** {selected_model}
-                - **Provider:** Ollama (Local)
-                - **Privacy:** ✅ Fully local processing
-                - **Cost:** ✅ Free
-                """)
+            st.markdown(f"""
+            **Model Info:**
+            - **Model:** {selected_model}
+            - **Provider:** {ai_provider}
+            - **Processing:** Cloud API
+            """)
 
-    # Data Display and Download
-    if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
+    # Data Display and Download for single image
+    if processing_mode == "Single Image" and 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
         st.divider()
         st.subheader("Extracted Data Preview")
         st.dataframe(st.session_state.extracted_df)
