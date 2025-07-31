@@ -13,3 +13,7 @@ psycopg2-binary
 opencv-python-headless
 pymupdf
 plotly 
+matplotlib
+seaborn
+scikit-learn
+scipy
