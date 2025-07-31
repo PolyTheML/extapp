@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import anthropic
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import zipfile
 
 # --- Helper Functions ---
 def prepare_image_from_pil(pil_image):
@@ -90,6 +91,9 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(model=model_name, max_tokens=4096, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image_data}}, {"type": "text", "text": prompt}]}])
         json_response_text = message.content[0].text
+        # Clean potential markdown code fences
+        if json_response_text.strip().startswith("```json"):
+            json_response_text = json_response_text.strip()[7:-3].strip()
         parsed_json = json.loads(json_response_text)
         return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
     except Exception as e:
@@ -202,9 +206,9 @@ def to_excel_multiple_sheets(dataframes_dict):
 def get_model_options(ai_provider):
     """Get model options based on AI provider"""
     if ai_provider == "Google Gemini":
-        return ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-pro", "gemini-1.5-pro"]
+        return ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-1.0-pro"]
     elif ai_provider == "Anthropic Claude":
-        return ["claude-3-5-sonnet-20240620", "claude-3-haiku-20240307", "claude-3-opus-20240229"]
+        return ["claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307"]
     else:
         return []
 
@@ -215,7 +219,7 @@ anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 
 st.title("Step 2: 🔎 AI-Powered Table Extractor")
 
-if not st.session_state.get('converted_pil_images'):
+if 'converted_pil_images' not in st.session_state or not st.session_state.converted_pil_images:
     st.warning("⚠️ Please go back to the **📂 PDF Converter** page and convert a PDF first.")
 else:
     st.markdown("Choose to extract tables from individual images or process all images at once.")
@@ -285,13 +289,14 @@ else:
                             # Store results
                             st.session_state.confidence = confidence
                             st.session_state.reasoning = reasoning
+                            st.session_state.processing_time = processing_time
                             
                             if table_data and len(table_data) > 1:
                                 try:
                                     header, data = table_data[0], table_data[1:]
                                     st.session_state.extracted_df = pd.DataFrame(data, columns=header)
                                     st.session_state.original_df = st.session_state.extracted_df.copy()
-                                    st.success(f"✅ Table extracted successfully in {processing_time:.1f} seconds!")
+                                    st.success(f"✅ Table extracted successfully in {st.session_state.processing_time:.1f} seconds!")
                                     st.info("✅ Data is ready! Please proceed to the **🤖 Validator** page.")
                                 except Exception as e:
                                     st.error(f"Data Mismatch Error: {e}. Trying to load without a header.")
@@ -347,11 +352,6 @@ else:
             # Start batch processing
             start_time = time.time()
             
-            # Progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            results_container = st.container()
-            
             with st.spinner(f"Processing {total_images} images with {ai_provider}..."):
                 # Run batch extraction
                 results = batch_extract_tables(
@@ -362,165 +362,126 @@ else:
                     batch_max_workers
                 )
                 
-                # Update progress
-                progress_bar.progress(1.0)
-                processing_time = time.time() - start_time
-                
-                # Analyze results
-                successful_extractions = [r for r in results if r['success']]
-                failed_extractions = [r for r in results if not r['success']]
-                
-                # Display summary
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Processed", total_images)
-                with col2:
-                    st.metric("Successful", len(successful_extractions))
-                with col3:
-                    st.metric("Failed", len(failed_extractions))
-                with col4:
-                    st.metric("Processing Time", f"{processing_time:.1f}s")
-                
-                if successful_extractions:
-                    st.success(f"✅ Successfully extracted {len(successful_extractions)} tables!")
-                    
-                    # Store batch results in session state
-                    st.session_state.batch_results = results
-                    st.session_state.batch_dataframes = {
-                        f"Image_{r['index']+1}": r['dataframe'] 
-                        for r in successful_extractions if r['dataframe'] is not None
-                    }
-                    
-                    # Show detailed results
-                    with st.expander("📊 Detailed Results", expanded=True):
-                        for result in results:
-                            col1, col2, col3 = st.columns([1, 2, 1])
-                            
-                            with col1:
-                                st.image(
-                                    st.session_state.converted_pil_images[result['index']], 
-                                    caption=f"Image {result['index']+1}",
-                                    width=150
-                                )
-                            
-                            with col2:
-                                if result['success']:
-                                    st.success(f"✅ **Image {result['index']+1}** - Table extracted")
-                                    if result['dataframe'] is not None:
-                                        st.write(f"**Rows:** {len(result['dataframe'])}, **Columns:** {len(result['dataframe'].columns)}")
-                                        st.write(f"**Confidence:** {result['confidence']:.1%}")
-                                        
-                                        # Show preview of extracted data with toggle button
-                                        preview_key = f"show_preview_{result['index']}"
-                                        if preview_key not in st.session_state:
-                                            st.session_state[preview_key] = False
-                                        
-                                        if st.button(f"👁️ {'Hide' if st.session_state[preview_key] else 'Show'} Preview", 
-                                                   key=f"preview_btn_{result['index']}", 
-                                                   help="Click to show/hide data preview"):
-                                            st.session_state[preview_key] = not st.session_state[preview_key]
-                                        
-                                        if st.session_state[preview_key]:
-                                            st.dataframe(result['dataframe'].head(), use_container_width=True)
-                                else:
-                                    st.error(f"❌ **Image {result['index']+1}** - Failed")
-                                    st.write(f"**Error:** {result['error']}")
-                            
-                            with col3:
-                                if result['success'] and result['dataframe'] is not None:
-                                    # Individual download buttons
-                                    csv_data = result['dataframe'].to_csv(index=False).encode('utf-8')
-                                    st.download_button(
-                                        label="📥 CSV",
-                                        data=csv_data,
-                                        file_name=f"image_{result['index']+1}_table.csv",
-                                        mime="text/csv",
-                                        key=f"csv_{result['index']}"
-                                    )
-                                    
-                                    excel_data = to_excel(result['dataframe'])
-                                    st.download_button(
-                                        label="📥 Excel",
-                                        data=excel_data,
-                                        file_name=f"image_{result['index']+1}_table.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                        key=f"excel_{result['index']}"
-                                    )
-                    
-                    # Bulk download options
-                    st.divider()
-                    st.subheader("📦 Bulk Download Options")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.markdown("**📋 Individual CSV Files (ZIP)**")
-                        if st.button("📥 Download All CSVs as ZIP", use_container_width=True):
-                            import zipfile
-                            zip_buffer = BytesIO()
-                            
-                            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                                for result in successful_extractions:
-                                    if result['dataframe'] is not None:
-                                        csv_data = result['dataframe'].to_csv(index=False)
-                                        zip_file.writestr(
-                                            f"image_{result['index']+1}_table.csv", 
-                                            csv_data
-                                        )
-                            
-                            st.download_button(
-                                label="📥 Download ZIP File",
-                                data=zip_buffer.getvalue(),
-                                file_name="all_extracted_tables.zip",
-                                mime="application/zip"
-                            )
-                    
-                    with col2:
-                        st.markdown("**📊 Combined Excel File (Multiple Sheets)**")
-                        if st.button("📥 Create Combined Excel File", use_container_width=True):
-                            if st.session_state.batch_dataframes:
-                                combined_excel = to_excel_multiple_sheets(st.session_state.batch_dataframes)
-                                st.download_button(
-                                    label="📥 Download Combined Excel",
-                                    data=combined_excel,
-                                    file_name="all_tables_combined.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                
-                if failed_extractions:
-                    st.warning(f"⚠️ {len(failed_extractions)} images failed to process")
-                    
-                    with st.expander("❌ Failed Extractions"):
-                        for result in failed_extractions:
-                            st.error(f"**Image {result['index']+1}:** {result['error']}")
-                
-                # Option to retry failed extractions
-                if failed_extractions:
-                    st.divider()
-                    if st.button("🔄 Retry Failed Extractions", type="secondary"):
-                        failed_images = [(r['index'], st.session_state.converted_pil_images[r['index']]) for r in failed_extractions]
-                        
-                        with st.spinner(f"Retrying {len(failed_images)} failed extractions..."):
-                            retry_args = [
-                                (idx, img, ai_provider, selected_model, api_key_to_use)
-                                for idx, img in failed_images
-                            ]
-                            
-                            retry_results = []
-                            for args in retry_args:
-                                result = process_single_image(args)
-                                retry_results.append(result)
-                            
-                            # Update original results
-                            for retry_result in retry_results:
-                                for i, original_result in enumerate(st.session_state.batch_results):
-                                    if original_result['index'] == retry_result['index']:
-                                        st.session_state.batch_results[i] = retry_result
-                                        break
-                            
-                            st.rerun()
+                # Store results in session state to persist them
+                st.session_state.batch_results = results
+                st.session_state.batch_processing_complete = True
+                st.session_state.batch_time = time.time() - start_time
+            
+            st.rerun() # Rerun to display results outside the 'if button' block
 
-    # Display single image results
+    # --- Display Batch Results (This block is now outside the button click) ---
+    if processing_mode == "Batch Process All Images" and st.session_state.get("batch_processing_complete"):
+        results = st.session_state.batch_results
+        total_images = len(results)
+        successful_extractions = [r for r in results if r['success']]
+        failed_extractions = [r for r in results if not r['success']]
+        
+        # Display summary
+        st.subheader("🏁 Batch Processing Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Processed", total_images)
+        with col2:
+            st.metric("✅ Successful", len(successful_extractions))
+        with col3:
+            st.metric("❌ Failed", len(failed_extractions))
+        with col4:
+            st.metric("⏱️ Time Taken", f"{st.session_state.batch_time:.1f}s")
+        
+        if successful_extractions:
+            st.success(f"Successfully extracted tables from {len(successful_extractions)} images!")
+            
+            st.session_state.batch_dataframes = {
+                f"Image_{r['index']+1}": r['dataframe'] 
+                for r in successful_extractions if r['dataframe'] is not None
+            }
+            
+            # --- START OF MODIFIED SECTION ---
+            # Bulk download options
+            st.divider()
+            st.subheader("📦 Bulk Download Options")
+            
+            d_col1, d_col2 = st.columns(2)
+            
+            with d_col1:
+                st.markdown("**📋 Individual CSV Files (ZIP)**")
+                try:
+                    zip_buffer = BytesIO()
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        for result in successful_extractions:
+                            if result.get('dataframe') is not None and not result['dataframe'].empty:
+                                csv_data = result['dataframe'].to_csv(index=False)
+                                zip_file.writestr(
+                                    f"image_{result['index']+1}_table.csv", 
+                                    csv_data
+                                )
+                    
+                    st.download_button(
+                        label="📥 Download All CSVs as ZIP",
+                        data=zip_buffer.getvalue(),
+                        file_name="all_extracted_tables.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.error(f"Could not create ZIP file: {e}")
+
+            with d_col2:
+                st.markdown("**📊 Combined Excel File (Multiple Sheets)**")
+                if 'batch_dataframes' in st.session_state and st.session_state.batch_dataframes:
+                    try:
+                        combined_excel = to_excel_multiple_sheets(st.session_state.batch_dataframes)
+                        st.download_button(
+                            label="📥 Download Combined Excel",
+                            data=combined_excel,
+                            file_name="all_tables_combined.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    except Exception as e:
+                        st.error(f"Could not create Excel file: {e}")
+            # --- END OF MODIFIED SECTION ---
+
+            # Show detailed results
+            with st.expander("📊 Detailed Results", expanded=True):
+                for result in results:
+                    r_col1, r_col2, r_col3 = st.columns([1, 2, 1])
+                    
+                    with r_col1:
+                        st.image(
+                            st.session_state.converted_pil_images[result['index']], 
+                            caption=f"Image {result['index']+1}",
+                            width=150
+                        )
+                    
+                    with r_col2:
+                        if result['success']:
+                            st.success(f"**Image {result['index']+1}** - Table extracted")
+                            if result['dataframe'] is not None:
+                                st.write(f"**Rows:** {len(result['dataframe'])}, **Columns:** {len(result['dataframe'].columns)}")
+                                st.write(f"**Confidence:** {result['confidence']:.1%}")
+                                st.dataframe(result['dataframe'].head(), use_container_width=True)
+                        else:
+                            st.error(f"**Image {result['index']+1}** - Failed")
+                            st.write(f"**Error:** {result['error']}")
+                    
+                    with r_col3:
+                        if result['success'] and result['dataframe'] is not None:
+                            csv_data = result['dataframe'].to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label="📥 CSV",
+                                data=csv_data,
+                                file_name=f"image_{result['index']+1}_table.csv",
+                                mime="text/csv",
+                                key=f"csv_{result['index']}"
+                            )
+
+        if failed_extractions:
+            with st.expander("❌ Failed Extractions"):
+                for result in failed_extractions:
+                    st.error(f"**Image {result['index']+1}:** {result['reasoning']} - {result['error']}")
+
+    # --- Display Single Image Results ---
     if processing_mode == "Single Image" and st.session_state.get('confidence') is not None:
         st.subheader("📊 Extraction Results")
         
@@ -528,19 +489,16 @@ else:
         with col1:
             st.metric(label="Confidence Score", value=f"{st.session_state.confidence:.1%}")
         with col2:
-            if 'processing_time' in locals():
-                st.metric(label="Processing Time", value=f"{processing_time:.1f}s")
+            st.metric(label="Processing Time", value=f"{st.session_state.processing_time:.1f}s")
         with col3:
             st.metric(label="AI Provider", value=ai_provider)
         
         with st.expander("🧠 AI's Reasoning"):
             st.info(st.session_state.get('reasoning', 'No reasoning provided.'))
-            
             st.markdown(f"""
             **Model Info:**
             - **Model:** {selected_model}
             - **Provider:** {ai_provider}
-            - **Processing:** Cloud API
             """)
 
     # Data Display and Download for single image
@@ -552,10 +510,10 @@ else:
         st.divider()
         st.subheader("📥 Download Extracted Data")
         
-        col1, col2 = st.columns(2)
-        with col1:
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
             file_name = st.text_input("File Name (without extension):", value="extracted_table", key="download_filename")
-        with col2:
+        with dl_col2:
             file_format = st.selectbox("Choose Format:", ["Excel (.xlsx)", "CSV (.csv)"], key="download_format")
         
         if file_name:
