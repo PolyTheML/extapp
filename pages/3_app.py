@@ -13,6 +13,21 @@ import anthropic
 import time
 
 # --- Helper Functions ---
+def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Converts all object-type columns with mixed types to string,
+    and ensures consistent serialization with PyArrow.
+    """
+    for col in df.select_dtypes(include='object').columns:
+        try:
+            # If all values are numeric strings, convert to float
+            if pd.to_numeric(df[col], errors='coerce').notna().sum() >= len(df[col]) * 0.9:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            else:
+                df[col] = df[col].astype(str)
+        except Exception as e:
+            df[col] = df[col].astype(str)
+    return df
 def prepare_image_from_pil(pil_image):
     """Resizes, encodes, and prepares a PIL image for API requests."""
     try:
@@ -224,7 +239,8 @@ else:
     if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
         st.divider()
         st.subheader("Extracted Data Preview")
-        st.dataframe(st.session_state.extracted_df)
+        clean_df = normalize_dataframe(st.session_state.extracted_df)
+        st.dataframe(clean_df)
         
         st.divider()
         st.subheader("📥 Download Extracted Data")
