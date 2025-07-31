@@ -10,6 +10,7 @@ import json
 from io import BytesIO
 from dotenv import load_dotenv
 import anthropic
+import openai # Added for OpenAI
 import time
 
 # --- Helper Functions ---
@@ -28,6 +29,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         except Exception as e:
             df[col] = df[col].astype(str)
     return df
+
 def prepare_image_from_pil(pil_image):
     """Resizes, encodes, and prepares a PIL image for API requests."""
     try:
@@ -82,9 +84,9 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
     """Extracts table data using Google Gemini API."""
     if not api_key:
         return None, 0.0, "API key not configured."
-    
+
     prompt = create_layout_aware_prompt()
-    
+
     payload = {"contents": [{"role": "user", "parts": [{"text": prompt}, {"inlineData": {"mimeType": "image/png", "data": base64_image_data}}] }], "generationConfig": {"responseMimeType": "application/json"}}
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     try:
@@ -101,9 +103,9 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
     """Extracts table data using Anthropic Claude API."""
     if not api_key:
         return None, 0.0, "API key not configured."
-    
+
     prompt = create_layout_aware_prompt()
-    
+
     try:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(model=model_name, max_tokens=4096, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image_data}}, {"type": "text", "text": prompt}]}])
@@ -116,6 +118,44 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
     except Exception as e:
         return None, 0.0, f"API error: {str(e)}"
 
+# --- NEW: Function to handle OpenAI extraction ---
+def extract_table_with_openai(base64_image_data, api_key, model_name):
+    """Extracts table data using OpenAI GPT-4 API."""
+    if not api_key:
+        return None, 0.0, "API key not configured."
+
+    prompt = create_layout_aware_prompt()
+
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image_data}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=4096,
+        )
+        json_response_text = response.choices[0].message.content
+        # Clean potential markdown code fences
+        if json_response_text.strip().startswith("```json"):
+            json_response_text = json_response_text.strip()[7:-3].strip()
+        parsed_json = json.loads(json_response_text)
+        return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
+    except Exception as e:
+        return None, 0.0, f"API error: {str(e)}"
+
+
 def to_excel(df):
     """Converts a DataFrame to an in-memory Excel file."""
     output = BytesIO()
@@ -127,6 +167,7 @@ def to_excel(df):
 load_dotenv()
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY") # Added for OpenAI
 
 st.title("Step 2: 🔎 AI-Powered Table Extractor")
 
@@ -134,34 +175,36 @@ if 'converted_pil_images' not in st.session_state or not st.session_state.conver
     st.warning("⚠️ Please go back to the **📂 PDF Converter** page and convert a PDF first.")
 else:
     st.markdown("Choose an image from the converted PDF and an AI model to extract the table.")
-    
+
     # AI Configuration
     st.header("⚙️ AI Configuration")
+    # --- MODIFIED: Added OpenAI models to the list ---
     model_options = [
-        "claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307",
-        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-pro"
+        "gpt-4o", "gpt-4-turbo", # OpenAI Models
+        "claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307", # Anthropic Models
+        "gemini-1.5-pro-latest", "gemini-1.5-flash-latest" # Google Models
     ]
     selected_model = st.selectbox("Choose AI Model:", options=model_options)
-    
+
     st.divider()
-    
+
     # Image Processing
     st.header("🖼️ Image Processing")
-    
+
     image_options = {f"Image {i+1}": i for i in range(len(st.session_state.converted_pil_images))}
     if image_options:
         selected_image_key = st.selectbox("Choose an image to process:", options=list(image_options.keys()))
         selected_image_index = image_options[selected_image_key]
         st.session_state.selected_image_index = selected_image_index
         selected_pil_image = st.session_state.converted_pil_images[selected_image_index]
-        
+
         col1, col2 = st.columns([2, 1])
         with col1:
             st.image(selected_pil_image, caption="Selected Image for Extraction", use_container_width=True)
-        
+
         with col2:
             if st.button("Extract Table from Image", type="primary"):
-                # Determine provider and API key from selected model
+                # --- MODIFIED: Added logic for OpenAI provider ---
                 if "gemini" in selected_model:
                     ai_provider = "Google Gemini"
                     api_key_to_use = gemini_api_key
@@ -170,31 +213,35 @@ else:
                     ai_provider = "Anthropic Claude"
                     api_key_to_use = anthropic_api_key
                     extraction_function = extract_table_with_claude
+                elif "gpt" in selected_model: # Logic for OpenAI
+                    ai_provider = "OpenAI"
+                    api_key_to_use = openai_api_key
+                    extraction_function = extract_table_with_openai
                 else:
                     st.error("Invalid model selected. Cannot determine AI provider.")
                     st.stop()
-                
+
                 if not api_key_to_use:
                     st.warning(f"Please add your {ai_provider} API Key to the .env file.")
                 else:
                     with st.spinner(f"🤖 {ai_provider} is analyzing the image with **{selected_model}**. Please wait..."):
                         start_time = time.time()
-                        
+
                         base64_image = prepare_image_from_pil(selected_pil_image)
                         if base64_image:
                             table_data, confidence, reasoning = extraction_function(base64_image, api_key_to_use, selected_model)
                         else:
                             table_data, confidence, reasoning = None, 0.0, "Failed to prepare image"
-                        
+
                         processing_time = time.time() - start_time
-                        
+
                         # Store results in session state
                         st.session_state.ai_provider = ai_provider
                         st.session_state.confidence = confidence
                         st.session_state.reasoning = reasoning
                         st.session_state.processing_time = processing_time
                         st.session_state.selected_model = selected_model
-                        
+
                         if table_data and len(table_data) > 1:
                             try:
                                 header, data = table_data[0], table_data[1:]
@@ -218,7 +265,7 @@ else:
     # --- Display Single Image Results ---
     if st.session_state.get('confidence') is not None:
         st.subheader("📊 Extraction Results")
-        
+
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric(label="Confidence Score", value=f"{st.session_state.confidence:.1%}")
@@ -226,7 +273,7 @@ else:
             st.metric(label="Processing Time", value=f"{st.session_state.processing_time:.1f}s")
         with col3:
             st.metric(label="AI Provider", value=st.session_state.get('ai_provider', 'N/A'))
-        
+
         with st.expander("🧠 AI's Reasoning"):
             st.info(st.session_state.get('reasoning', 'No reasoning provided.'))
             st.markdown(f"""
@@ -241,16 +288,16 @@ else:
         st.subheader("Extracted Data Preview")
         clean_df = normalize_dataframe(st.session_state.extracted_df)
         st.dataframe(clean_df)
-        
+
         st.divider()
         st.subheader("📥 Download Extracted Data")
-        
+
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             file_name = st.text_input("File Name (without extension):", value="extracted_table", key="download_filename")
         with dl_col2:
             file_format = st.selectbox("Choose Format:", ["Excel (.xlsx)", "CSV (.csv)"], key="download_format")
-        
+
         if file_name:
             if file_format == "Excel (.xlsx)":
                 file_data = to_excel(st.session_state.extracted_df)
@@ -260,7 +307,7 @@ else:
                 file_data = st.session_state.extracted_df.to_csv(index=False).encode('utf-8')
                 file_extension = "csv"
                 mime_type = "text/csv"
-            
+
             st.download_button(
                 label=f"📥 Download as {file_format}",
                 data=file_data,
