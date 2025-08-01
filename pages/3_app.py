@@ -340,7 +340,7 @@ else:
     # --- MODIFIED: Added OpenAI models to the list ---
     model_options = [
         "gpt-4o", "gpt-4-turbo", # OpenAI Models
-        "claude-3-5-sonnet-20240620" # Anthropic Models
+        "claude-3-5-sonnet-20240620", # Anthropic Models
         "gemini-2.5-pro", "gemini-2.5-flash" # Google Models
     ]
     selected_model = st.selectbox("Choose AI Model:", options=model_options)
