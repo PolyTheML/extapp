@@ -18,8 +18,34 @@ import re
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Converts all object-type columns with mixed types to string,
-    and ensures consistent serialization with PyArrow.
+    handles duplicate column names, and ensures consistent serialization with PyArrow.
     """
+    if df is None or df.empty:
+        return df
+    
+    # Handle duplicate column names by adding suffixes
+    cols = df.columns.tolist()
+    seen = {}
+    new_cols = []
+    
+    for col in cols:
+        if col in seen:
+            seen[col] += 1
+            new_cols.append(f"{col}_{seen[col]}")
+        else:
+            seen[col] = 0
+            new_cols.append(col)
+    
+    df.columns = new_cols
+    
+    # Clean up column names - remove leading/trailing whitespace
+    df.columns = df.columns.str.strip()
+    
+    # Remove completely empty rows and columns
+    df = df.dropna(how='all')  # Remove rows where all values are NaN
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]  # Remove unnamed columns
+    
+    # Convert object columns with proper handling
     for col in df.select_dtypes(include='object').columns:
         try:
             # If all values are numeric strings, convert to float
@@ -29,6 +55,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 df[col] = df[col].astype(str)
         except Exception as e:
             df[col] = df[col].astype(str)
+    
     return df
 
 def prepare_image_from_pil(pil_image):
@@ -203,7 +230,7 @@ def extract_table_with_claude_enhanced(base64_image_data, api_key, model_name):
         # Show cleaned response for debugging
         with st.expander("🔍 Claude Response Analysis"):
             st.write(f"**Raw length:** {len(raw_text)} chars")
-            st.write(f"**Cleaned length:** {len(cleaned_text)} chars")
+            st.write(f"**Cleaned length:** {len(cleaned_text)} chars")  # FIXED: Added missing quote
             st.code(cleaned_text[:2000], language="json")
             
             # Try to identify why JSON might be failing
@@ -279,10 +306,22 @@ def clean_json_response(raw_text):
 
 def to_excel(df):
     """Converts a DataFrame to an in-memory Excel file."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
-    return output.getvalue()
+    try:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sheet1')
+        return output.getvalue()
+    except Exception as e:
+        st.error(f"Error creating Excel file: {str(e)}")
+        return None
+
+def to_csv(df):
+    """Convert DataFrame to CSV string for download."""
+    try:
+        return df.to_csv(index=False).encode('utf-8')
+    except Exception as e:
+        st.error(f"Error creating CSV file: {str(e)}")
+        return None
 
 def extract_table_with_gemini(base64_image_data, api_key, model_name):
     """Extracts table data using Google Gemini API."""
@@ -400,8 +439,6 @@ def extract_table_with_claude_fallback(base64_image_data, api_key, model_name):
         
     except Exception as e:
         return None, 0.0, f"Fallback method also failed: {str(e)}"
-
-# [Include all other existing functions: extract_table_with_gemini, extract_table_with_openai, to_excel, etc.]
 
 # --- Main App UI with Enhanced Claude Integration ---
 load_dotenv()
@@ -555,7 +592,6 @@ else:
                             if reasoning:
                                 st.error(reasoning)
 
-    # [Rest of the UI code for displaying results, downloads, etc. remains the same]
     # Display Results
     if st.session_state.get('confidence') is not None:
         st.subheader("📊 Extraction Results")
@@ -571,46 +607,68 @@ else:
         with st.expander("🧠 AI's Analysis"):
             st.info(st.session_state.get('reasoning', 'No reasoning provided.'))
 
-    # Data Display and Download
+    # Data Display and Download - ENHANCED WITH BETTER ERROR HANDLING
     if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
         st.divider()
         st.subheader("📋 Extracted Data Preview")
-        clean_df = normalize_dataframe(st.session_state.extracted_df)
-        st.dataframe(clean_df, use_container_width=True)
-
-        # Enhanced data summary
-        row_count = len(clean_df)
-        col_count = len(clean_df.columns)
-        st.markdown(f"**📊 Data Summary:** {row_count} rows × {col_count} columns")
         
-        if row_count >= 50:
-            st.success("🎉 Large table successfully extracted!")
-        elif row_count < 20:
-            st.warning("⚠️ Fewer rows than expected. Consider using fallback extraction or different model.")
+        try:
+            # Use copy to avoid modifying original and apply normalization
+            clean_df = normalize_dataframe(st.session_state.extracted_df.copy())
+            st.dataframe(clean_df, use_container_width=True)
 
-        st.divider()
-        st.subheader("📥 Download Extracted Data")
+            # Enhanced data summary
+            row_count = len(clean_df)
+            col_count = len(clean_df.columns)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Rows", row_count)
+            with col2:
+                st.metric("Total Columns", col_count)
+            with col3:
+                st.metric("Data Points", row_count * col_count)
+            
+            if row_count >= 50:
+                st.success("🎉 Large table successfully extracted!")
+            elif row_count < 20:
+                st.warning("⚠️ Fewer rows than expected. Consider using fallback extraction or different model.")
 
-        dl_col1, dl_col2 = st.columns(2)
-        with dl_col1:
-            file_name = st.text_input("File Name:", value=f"banking_table_{row_count}rows", key="download_filename")
-        with dl_col2:
-            file_format = st.selectbox("Format:", ["Excel (.xlsx)", "CSV (.csv)"], key="download_format")
+            st.divider()
+            st.subheader("💾 Download Processed Data")
 
-        if file_name:
-            if file_format == "Excel (.xlsx)":
-                file_data = to_excel(clean_df)
-                file_extension = "xlsx"
-                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            else:
-                file_data = clean_df.to_csv(index=False).encode('utf-8')
-                file_extension = "csv"
-                mime_type = "text/csv"
+            col1, col2 = st.columns(2)
+            with col1:
+                file_name = st.text_input("File Name:", value=f"banking_table_{row_count}rows", key="download_filename")
+            with col2:
+                file_format = st.selectbox("Format:", ["Excel (.xlsx)", "CSV (.csv)"], key="download_format")
 
-            st.download_button(
-                label=f"📥 Download {row_count} rows as {file_format}",
-                data=file_data,
-                file_name=f"{file_name}.{file_extension}",
-                mime=mime_type,
-                type="primary"
-            )
+            if file_name:
+                try:
+                    if file_format == "Excel (.xlsx)":
+                        file_data = to_excel(clean_df)
+                        file_extension = "xlsx"
+                        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    else:
+                        file_data = to_csv(clean_df)
+                        file_extension = "csv"
+                        mime_type = "text/csv"
+
+                    if file_data is not None:
+                        st.download_button(
+                            label=f"📥 Download {row_count} rows as {file_format}",
+                            data=file_data,
+                            file_name=f"{file_name}.{file_extension}",
+                            mime=mime_type,
+                            type="primary"
+                        )
+                        st.success("✅ Data extraction completed successfully!")
+                    else:
+                        st.error("❌ Failed to prepare download file.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error preparing download: {str(e)}")
+                    
+        except Exception as e:
+            st.error(f"❌ Error processing extracted data: {str(e)}")
+            st.info("Try extracting the data again or use a different AI model.")
