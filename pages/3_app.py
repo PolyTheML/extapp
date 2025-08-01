@@ -45,38 +45,100 @@ def prepare_image_from_pil(pil_image):
         st.error(f"Error preparing image: {e}"); return None
 
 def create_layout_aware_prompt():
-    """Creates a standardized prompt for layout-aware table extraction."""
+    """Creates a standardized prompt for layout-aware table extraction with merged cell support."""
     return """
-    You are an expert data extractor. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation.
+    You are an expert data analyst specializing in complex financial and technical table extraction. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation, cell structure, and data density.
 
-    **Step 1: Detect Table Layout**
-    First, determine the table's layout. Is it:
+    **Step 1: Detect Table Layout and Structure**
+    First, determine the table's layout and structure. Identify if it has:
+    
     a) **Standard Layout:** Headers are in the top row, and data records are in subsequent rows.
     b) **Transposed Layout:** Headers are in the first column, and data records are in subsequent columns.
+    c) **Complex Structure:** The table contains merged cells, nested headers, or hierarchical organization.
+    d) **Dense Financial Layout:** Multi-level headers, grouped columns, rotated text, and dense numerical data typical of financial reports.
 
-    **Step 2: Extract Data Based on Layout**
-    - **If Standard Layout:** Proceed with normal extraction. The first row is your header list, and each row that follows is a data list.
-    - **If Transposed Layout:** You must **un-pivot** the data. The first column contains the headers, and each following column is a record. You must reconstruct this into a standard format.
-      - **Example of a Transposed Table:**
-        [
-          ["Name", "John Doe"],
-          ["Age", "30"],
-          ["City", "New York"]
-        ]
-      - **Your mandatory output for the above example must be:**
-        [
-          ["Name", "Age", "City"],
-          ["John Doe", "30", "New York"]
-        ]
+    **Step 2: Handle Complex Cell Structures and Dense Data**
+    Pay special attention to these common patterns in financial/technical tables:
+    
+    - **Rotated/Vertical Text Headers:** Text that appears rotated 90° should be read and included as column headers.
+    
+    - **Multi-Level Column Groups:** When columns are grouped under parent headers (like "1 USD / KHR" spanning multiple sub-columns), create descriptive combined headers.
+      - Example: "1 USD / KHR" + "Profit Loss" = "1 USD KHR Profit Loss"
+    
+    - **Merged Header Cells:** When a header spans multiple columns, create meaningful combined names rather than repetition.
+      - Better: ["Company", "USD Profit", "USD Loss", "KHR Profit", "KHR Loss"] 
+      - Avoid: ["Company", "Currency", "Currency", "Currency", "Currency"]
+    
+    - **Merged Data Cells:** When a data cell spans multiple columns/rows, repeat the value in each position it occupies.
+    
+    - **Dense Numerical Data:** Handle parentheses indicating negative numbers, commas in large numbers, and decimal precision carefully.
+    
+    - **Row Headers with Categories:** When left-most columns contain categorical data (like company names, industry types), preserve these exactly.
+    
+    - **Empty/Dash Cells:** Distinguish between truly empty cells, cells with dashes (-), and cells that are part of merged ranges.
 
-    **Step 3: Final JSON Output**
-    Regardless of the original layout, you must return a single, valid JSON object with the following three keys: "table_data", "confidence_score", and "reasoning".
+    **Step 3: Extract Data Based on Layout**
+    - **If Standard Layout:** Extract systematically row by row, ensuring column alignment is maintained.
+    - **If Transposed Layout:** Un-pivot the data while preserving all relationships.
+    - **If Complex/Dense Structure:** 
+      1. First identify all column boundaries carefully
+      2. Create meaningful column headers by combining group headers with sub-headers
+      3. Extract data row by row, maintaining precise column alignment
+      4. Handle special formatting (parentheses, dashes, currency symbols)
 
-    - **`table_data`**: MUST be a list of lists in the **standard format** (the first inner list is the header row).
-    - **`confidence_score`**: A numerical score from 0.0 to 1.0 on your confidence in the accuracy and correct orientation of the extraction.
-    - **`reasoning`**: **Crucially, state which layout you detected** (e.g., "Detected a transposed layout and un-pivoted the data.") and explain any challenges.
+    **Step 4: Special Handling for Financial Tables**
+    - **Currency Symbols:** Preserve currency information in headers or data as appropriate
+    - **Negative Numbers:** Convert parenthetical negatives like "(1,250)" to "-1250" or keep original format based on context
+    - **Large Numbers:** Preserve comma separators in large numbers
+    - **Percentage Values:** Keep percentage symbols where they appear
+    - **Date Formats:** Maintain original date formatting
+    - **Company/Entity Names:** Extract full company names even if they span multiple lines in the image
 
-    Your top priority is returning the data in the correct, standard format.
+    **Step 5: Data Consistency and Quality Rules**
+    - Every row must have the same number of columns as the header row
+    - Maintain consistent data types within columns (all numbers, all text, etc.)
+    - Preserve original number formatting when possible (commas, decimals, parentheses)
+    - No empty cells unless the original data is genuinely empty
+    - When multiple header levels exist, create clear, descriptive combined column names
+    - Ensure row labels/identifiers are properly captured from leftmost columns
+
+    **Step 6: Final JSON Output**
+    Return a single, valid JSON object with these five keys: "table_data", "confidence_score", "reasoning", "structure_notes", and "data_quality_notes".
+
+    - **`table_data`**: MUST be a list of lists in standard format. First inner list = headers, subsequent lists = data rows. Every row must have identical column count.
+    - **`confidence_score`**: Score from 0.0 to 1.0 reflecting extraction accuracy and completeness.
+    - **`reasoning`**: Describe the layout detected and extraction approach used.
+    - **`structure_notes`**: Document merged cells, grouped headers, rotated text, and complex formatting encountered.
+    - **`data_quality_notes`**: Note any data formatting decisions (negative number handling, currency preservation, etc.)
+
+    **Example for Dense Financial Table:**
+    Original complex structure with grouped headers:
+    ```
+    |           | 1 USD / KHR      | Exchange Rate |
+    | Company   | Profit | Loss    | Current       |
+    | ABC Bank  | 1,250  | (500)   | 4,100         |
+    ```
+    
+    Your output should be:
+    ```json
+    {
+      "table_data": [
+        ["Company", "1 USD KHR Profit", "1 USD KHR Loss", "Exchange Rate Current"],
+        ["ABC Bank", "1,250", "(500)", "4,100"]
+      ],
+      "structure_notes": "Detected grouped headers with '1 USD / KHR' spanning two sub-columns",
+      "data_quality_notes": "Preserved comma formatting in numbers and parentheses for negative values"
+    }
+    ```
+
+    **Critical Instructions for Dense Tables:**
+    1. Read ALL text carefully, including rotated or small text
+    2. Identify column boundaries precisely - dense tables often have narrow spacing
+    3. Create meaningful, unique column headers that capture the hierarchical structure
+    4. Maintain number formatting exactly as shown
+    5. Extract every visible data point - dense tables contain valuable information in every cell
+
+    Your top priority is complete, accurate extraction with meaningful column headers that reflect the table's hierarchical structure.
     """
 
 # --- AI Extraction Functions ---
