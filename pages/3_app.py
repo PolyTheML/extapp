@@ -268,8 +268,9 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
         return None, 0.0, "❌ Base64 image data is missing or corrupt."
 
     # Enforce correct model name
-    if "claude" in model_name.lower():
-        model_name = "claude-3-5-sonnet-20240620"
+    allowed_models = ["claude-3-5-sonnet-20240620", "claude-3-7-sonnet-20250219"]
+    if model_name not in allowed_models:
+        return None, 0.0, f"❌ Invalid model name. Please select one of: {', '.join(allowed_models)}"
 
     prompt = create_layout_aware_prompt()
 
@@ -278,7 +279,7 @@ def extract_table_with_claude(base64_image_data, api_key, model_name):
 
         response = client.messages.create(
             model=model_name,
-            max_tokens=4096,
+            max_tokens=8192,
             messages=[
                 {
                     "role": "user",
