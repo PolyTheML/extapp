@@ -86,37 +86,64 @@ def create_layout_aware_prompt():
       3. Extract data row by row, maintaining precise column alignment
       4. Handle special formatting (parentheses, dashes, currency symbols)
 
-    **Step 4: Special Handling for Financial Tables**
+    **Step 4: Special Handling for Financial Tables - NUMERICAL ACCURACY IS CRITICAL**
+    
+    **⚠️ ABSOLUTE PRIORITY: NUMERICAL ACCURACY ⚠️**
+    - **EVERY NUMBER MUST BE EXTRACTED EXACTLY AS SHOWN** - No approximations, no rounding, no guessing
+    - **Double-check every digit** - A single incorrect digit can invalidate financial data
+    - **If uncertain about a number, mark it clearly rather than guessing**
+    - **Verify decimal places, commas, and parentheses precisely**
+    
+    Specific formatting rules:
     - **Currency Symbols:** Preserve currency information in headers or data as appropriate
-    - **Negative Numbers:** Convert parenthetical negatives like "(1,250)" to "-1250" or keep original format based on context
-    - **Large Numbers:** Preserve comma separators in large numbers
-    - **Percentage Values:** Keep percentage symbols where they appear
-    - **Date Formats:** Maintain original date formatting
+    - **Negative Numbers:** Extract parenthetical negatives EXACTLY: "(1,250)" should remain "(1,250)" unless context clearly requires conversion
+    - **Large Numbers:** Preserve comma separators EXACTLY as shown: "1,250,000" not "1250000"
+    - **Decimal Precision:** Maintain exact decimal places: "1.50" not "1.5", "0.001" not ".001"
+    - **Percentage Values:** Keep percentage symbols and exact decimal precision where they appear
+    - **Date Formats:** Maintain original date formatting exactly
     - **Company/Entity Names:** Extract full company names even if they span multiple lines in the image
+    
+    **NUMERICAL VERIFICATION CHECKLIST:**
+    ✓ Every digit matches the source exactly
+    ✓ All commas, decimals, and parentheses are preserved
+    ✓ No numbers are accidentally transposed or approximated
+    ✓ Negative indicators (parentheses, minus signs) are captured correctly
 
-    **Step 5: Data Consistency and Quality Rules**
+    **Step 5: Data Consistency and Quality Rules - NUMERICAL PRECISION MANDATORY**
+    
+    **🎯 ZERO TOLERANCE FOR NUMERICAL ERRORS:**
     - Every row must have the same number of columns as the header row
+    - **ALL NUMBERS MUST BE PIXEL-PERFECT ACCURATE** - Treat each number as if millions of dollars depend on it
+    - **NEVER estimate or approximate numerical values** - If you cannot read a number clearly, mark it as "[UNCLEAR]" rather than guess
+    - **Maintain exact formatting:** Preserve commas, decimals, parentheses, and spacing exactly as shown
+    - **Cross-verify large numbers:** For numbers with 4+ digits, double-check each digit sequence
     - Maintain consistent data types within columns (all numbers, all text, etc.)
-    - Preserve original number formatting when possible (commas, decimals, parentheses)
     - No empty cells unless the original data is genuinely empty
     - When multiple header levels exist, create clear, descriptive combined column names
     - Ensure row labels/identifiers are properly captured from leftmost columns
+    
+    **CRITICAL ERROR PREVENTION:**
+    - Read each number digit by digit, left to right
+    - Pay special attention to similar-looking digits (6 vs 8, 3 vs 8, 1 vs 7)
+    - Verify that decimal points and commas are in correct positions
+    - Confirm parentheses placement for negative numbers
 
-    **Step 6: Final JSON Output**
-    Return a single, valid JSON object with these five keys: "table_data", "confidence_score", "reasoning", "structure_notes", and "data_quality_notes".
+    **Step 6: Final JSON Output - WITH NUMERICAL ACCURACY GUARANTEE**
+    Return a single, valid JSON object with these five keys: "table_data", "confidence_score", "reasoning", "structure_notes", and "numerical_accuracy_notes".
 
-    - **`table_data`**: MUST be a list of lists in standard format. First inner list = headers, subsequent lists = data rows. Every row must have identical column count.
-    - **`confidence_score`**: Score from 0.0 to 1.0 reflecting extraction accuracy and completeness.
+    - **`table_data`**: MUST be a list of lists in standard format. First inner list = headers, subsequent lists = data rows. Every row must have identical column count. **ALL NUMERICAL VALUES MUST BE EXACTLY AS SHOWN IN SOURCE.**
+    - **`confidence_score`**: Score from 0.0 to 1.0 reflecting extraction accuracy and completeness. **Reduce score significantly if any numbers were unclear or estimated.**
     - **`reasoning`**: Describe the layout detected and extraction approach used.
     - **`structure_notes`**: Document merged cells, grouped headers, rotated text, and complex formatting encountered.
-    - **`data_quality_notes`**: Note any data formatting decisions (negative number handling, currency preservation, etc.)
+    - **`numerical_accuracy_notes`**: **MANDATORY FIELD** - Explicitly confirm that all numbers were extracted with 100% accuracy, or note any numbers that were unclear/estimated with [UNCLEAR] markers.
 
-    **Example for Dense Financial Table:**
+    **Example for Dense Financial Table with Perfect Numerical Accuracy:**
     Original complex structure with grouped headers:
     ```
-    |           | 1 USD / KHR      | Exchange Rate |
-    | Company   | Profit | Loss    | Current       |
-    | ABC Bank  | 1,250  | (500)   | 4,100         |
+    |           | 1 USD / KHR        | Exchange Rate |
+    | Company   | Profit | Loss      | Current       |
+    | ABC Bank  | 1,250  | (500)     | 4,100.25      |
+    | XYZ Corp  | 15,875 | (2,100.5) | 4,099.80      |
     ```
     
     Your output should be:
@@ -124,12 +151,20 @@ def create_layout_aware_prompt():
     {
       "table_data": [
         ["Company", "1 USD KHR Profit", "1 USD KHR Loss", "Exchange Rate Current"],
-        ["ABC Bank", "1,250", "(500)", "4,100"]
+        ["ABC Bank", "1,250", "(500)", "4,100.25"],
+        ["XYZ Corp", "15,875", "(2,100.5)", "4,099.80"]
       ],
       "structure_notes": "Detected grouped headers with '1 USD / KHR' spanning two sub-columns",
-      "data_quality_notes": "Preserved comma formatting in numbers and parentheses for negative values"
+      "numerical_accuracy_notes": "All numerical values extracted with 100% accuracy - verified each digit, decimal place, and formatting symbol"
     }
     ```
+
+    **FINAL CRITICAL REMINDER:**
+    🚨 **FINANCIAL DATA ACCURACY IS NON-NEGOTIABLE** 🚨
+    - A single wrong digit can cause massive financial miscalculations
+    - Take extra time to verify each number rather than rushing
+    - When in doubt about a digit, use [UNCLEAR] rather than guessing
+    - Your numerical accuracy directly impacts financial decisions and compliance
 
     **Critical Instructions for Dense Tables:**
     1. Read ALL text carefully, including rotated or small text
