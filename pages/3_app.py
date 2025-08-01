@@ -47,15 +47,33 @@ def prepare_image_from_pil(pil_image):
 def create_layout_aware_prompt():
     """Creates a standardized prompt for layout-aware table extraction with merged cell support."""
     return """
-    You are an expert data analyst specializing in complex financial and technical table extraction. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation, cell structure, and data density.
+    You are an expert data analyst specializing in complex financial and technical table extraction. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation, cell structure, data density, and **COMPLETE ROW EXTRACTION**.
 
-    **Step 1: Detect Table Layout and Structure**
-    First, determine the table's layout and structure. Identify if it has:
+    **🚨 MISSION CRITICAL REQUIREMENTS 🚨**
+    1. **EXTRACT EVERY SINGLE ROW** - Missing rows = Complete failure
+    2. **NUMERICAL ACCURACY IS ABSOLUTE** - Every digit must be perfect
+    3. **NO ROW LEFT BEHIND** - Scan systematically from top to bottom
+
+    **Step 1: COMPLETE TABLE BOUNDARY DETECTION**
     
+    **🔍 MANDATORY ROW SCANNING PROTOCOL:**
+    1. **Identify the ENTIRE table boundary** - Find the absolute top, bottom, left, and right edges
+    2. **Count total rows visually BEFORE extraction** - This is your target row count
+    3. **Scan systematically from top to bottom** - Don't skip ANY horizontal line that contains data
+    4. **Look for continuation indicators** - Tables may extend beyond obvious boundaries
+    5. **Check for subtotals, totals, and summary rows** - These are data rows too!
+    
+    Determine the table's layout and structure:
     a) **Standard Layout:** Headers are in the top row, and data records are in subsequent rows.
-    b) **Transposed Layout:** Headers are in the first column, and data records are in subsequent columns.
+    b) **Transposed Layout:** Headers are in the first column, and data records are in subsequent columns.  
     c) **Complex Structure:** The table contains merged cells, nested headers, or hierarchical organization.
     d) **Dense Financial Layout:** Multi-level headers, grouped columns, rotated text, and dense numerical data typical of financial reports.
+    
+    **⚠️ ROW EXTRACTION CHECKPOINTS:**
+    - Did I scan the ENTIRE vertical space of the table?
+    - Are there any faint lines or subtle row separators I missed?
+    - Do I have continuation rows that might be formatted differently?
+    - Are there summary/total rows at the bottom that I need to include?
 
     **Step 2: Handle Complex Cell Structures and Dense Data**
     Pay special attention to these common patterns in financial/technical tables:
@@ -77,14 +95,37 @@ def create_layout_aware_prompt():
     
     - **Empty/Dash Cells:** Distinguish between truly empty cells, cells with dashes (-), and cells that are part of merged ranges.
 
-    **Step 3: Extract Data Based on Layout**
-    - **If Standard Layout:** Extract systematically row by row, ensuring column alignment is maintained.
-    - **If Transposed Layout:** Un-pivot the data while preserving all relationships.
-    - **If Complex/Dense Structure:** 
-      1. First identify all column boundaries carefully
-      2. Create meaningful column headers by combining group headers with sub-headers
-      3. Extract data row by row, maintaining precise column alignment
-      4. Handle special formatting (parentheses, dashes, currency symbols)
+    **Step 3: SYSTEMATIC ROW-BY-ROW EXTRACTION**
+    
+    **🎯 COMPLETE ROW EXTRACTION PROTOCOL:**
+    
+    **Phase 1: ROW INVENTORY**
+    - Count all visible rows in the table (including headers, data, subtotals, totals)
+    - Note any rows that might be partially visible or cut off
+    - Identify rows with different formatting (bold, italic, indented)
+    - Mark rows that span multiple lines or have wrapped text
+    
+    **Phase 2: SEQUENTIAL EXTRACTION**
+    - **Extract Row 1:** Headers (create meaningful combined names for grouped headers)
+    - **Extract Row 2:** First data row (verify column count matches headers)
+    - **Extract Row 3:** Second data row (verify alignment)
+    - **Continue systematically:** Extract EVERY subsequent row without exception
+    - **Include ALL special rows:** Subtotals, category breaks, summary rows, footnote references
+    
+    **Phase 3: EXTRACTION BY LAYOUT TYPE**
+    - **If Standard Layout:** Row-by-row extraction, maintaining perfect column alignment
+    - **If Transposed Layout:** Un-pivot while ensuring no columns (original rows) are missed
+    - **If Complex/Dense Structure:**
+      1. Map all column boundaries across the ENTIRE table height
+      2. Extract each row systematically, ensuring no row is skipped
+      3. Handle wrapped text and multi-line entries as single rows
+      4. Preserve special formatting indicators
+    
+    **🚨 ROW COMPLETENESS VERIFICATION:**
+    - **Before finishing:** Count extracted rows vs. visually counted rows
+    - **If counts don't match:** Re-scan for missed rows
+    - **Check bottom of table:** Often contains critical summary data
+    - **Verify no rows were accidentally merged or skipped**
 
     **Step 4: Special Handling for Financial Tables - NUMERICAL ACCURACY IS CRITICAL**
     
@@ -109,9 +150,19 @@ def create_layout_aware_prompt():
     ✓ No numbers are accidentally transposed or approximated
     ✓ Negative indicators (parentheses, minus signs) are captured correctly
 
-    **Step 5: Data Consistency and Quality Rules - NUMERICAL PRECISION MANDATORY**
+    **Step 5: COMPREHENSIVE DATA QUALITY ASSURANCE**
     
-    **🎯 ZERO TOLERANCE FOR NUMERICAL ERRORS:**
+    **🎯 ZERO TOLERANCE FOR MISSING ROWS OR INCORRECT NUMBERS:**
+    
+    **ROW COMPLETENESS REQUIREMENTS:**
+    - **EVERY visible row must be extracted** - No exceptions, no shortcuts
+    - **Total extracted rows must match visual count** - Recount if necessary
+    - **Include header rows, data rows, subtotal rows, total rows, and any footnote rows**
+    - **Don't skip rows with different formatting** (bold, italic, indented, highlighted)
+    - **Extract continued/wrapped rows as single entries**
+    - **Capture partial rows** if they contain any data
+    
+    **NUMERICAL PRECISION REQUIREMENTS:**
     - Every row must have the same number of columns as the header row
     - **ALL NUMBERS MUST BE PIXEL-PERFECT ACCURATE** - Treat each number as if millions of dollars depend on it
     - **NEVER estimate or approximate numerical values** - If you cannot read a number clearly, mark it as "[UNCLEAR]" rather than guess
@@ -122,11 +173,13 @@ def create_layout_aware_prompt():
     - When multiple header levels exist, create clear, descriptive combined column names
     - Ensure row labels/identifiers are properly captured from leftmost columns
     
-    **CRITICAL ERROR PREVENTION:**
-    - Read each number digit by digit, left to right
-    - Pay special attention to similar-looking digits (6 vs 8, 3 vs 8, 1 vs 7)
-    - Verify that decimal points and commas are in correct positions
-    - Confirm parentheses placement for negative numbers
+    **MANDATORY VERIFICATION CHECKLIST:**
+    ✓ Row count matches visual inspection
+    ✓ Every number is digit-perfect accurate
+    ✓ All formatting (commas, decimals, parentheses) preserved
+    ✓ No rows accidentally merged or skipped
+    ✓ Headers properly reflect hierarchical structure
+    ✓ Column alignment maintained across all rows
 
     **Step 6: Final JSON Output - WITH NUMERICAL ACCURACY GUARANTEE**
     Return a single, valid JSON object with these five keys: "table_data", "confidence_score", "reasoning", "structure_notes", and "numerical_accuracy_notes".
@@ -166,14 +219,23 @@ def create_layout_aware_prompt():
     - When in doubt about a digit, use [UNCLEAR] rather than guessing
     - Your numerical accuracy directly impacts financial decisions and compliance
 
-    **Critical Instructions for Dense Tables:**
-    1. Read ALL text carefully, including rotated or small text
-    2. Identify column boundaries precisely - dense tables often have narrow spacing
-    3. Create meaningful, unique column headers that capture the hierarchical structure
-    4. Maintain number formatting exactly as shown
-    5. Extract every visible data point - dense tables contain valuable information in every cell
+    **Critical Instructions for Dense Tables - NUMBERS ABOVE ALL:**
+    1. **🎯 NUMERICAL ACCURACY IS THE TOP PRIORITY** - Everything else is secondary
+    2. Read ALL text carefully, including rotated or small text, but TRIPLE-CHECK all numbers
+    3. Identify column boundaries precisely - dense tables often have narrow spacing
+    4. Create meaningful, unique column headers that capture the hierarchical structure
+    5. **Verify every single digit in every number** - Use systematic left-to-right verification
+    6. Extract every visible data point - dense tables contain valuable information in every cell
+    7. **If any number is unclear, mark as [UNCLEAR] rather than estimate**
 
-    Your top priority is complete, accurate extraction with meaningful column headers that reflect the table's hierarchical structure.
+    **ZERO-ERROR NUMERICAL EXTRACTION PROTOCOL:**
+    - Scan each number multiple times before recording
+    - Pay attention to number formatting patterns (commas every 3 digits, decimal precision)
+    - Verify negative indicators are correctly captured
+    - Cross-reference similar numbers to check for consistency in formatting
+    - Remember: Perfect accuracy on 90% of numbers is better than 95% accuracy on 100% of numbers
+
+    Your top priority is complete, accurate extraction with **PERFECT NUMERICAL PRECISION** and meaningful column headers that reflect the table's hierarchical structure.
     """
 
 # --- AI Extraction Functions ---
