@@ -10,7 +10,7 @@ import json
 from io import BytesIO
 from dotenv import load_dotenv
 import anthropic
-import openai # Added for OpenAI
+import openai
 import time
 
 # --- Helper Functions ---
@@ -47,198 +47,156 @@ def prepare_image_from_pil(pil_image):
 def create_layout_aware_prompt():
     """Creates a standardized prompt for layout-aware table extraction with merged cell support."""
     return """
-    You are an expert data analyst specializing in complex financial and technical table extraction. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation, cell structure, data density, and **COMPLETE ROW EXTRACTION**.
+    You are an expert data analyst specializing in complex financial and technical table extraction. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision.
 
-    **🚨 MISSION CRITICAL REQUIREMENTS �**
+    **CRITICAL REQUIREMENTS:**
     1. **EXTRACT EVERY SINGLE ROW** - Missing rows = Complete failure
     2. **NUMERICAL ACCURACY IS ABSOLUTE** - Every digit must be perfect
     3. **NO ROW LEFT BEHIND** - Scan systematically from top to bottom
 
-    **Step 1: COMPLETE TABLE BOUNDARY DETECTION**
-    
-    **🔍 MANDATORY ROW SCANNING PROTOCOL:**
-    1. **Identify the ENTIRE table boundary** - Find the absolute top, bottom, left, and right edges
-    2. **Count total rows visually BEFORE extraction** - This is your target row count
-    3. **Scan systematically from top to bottom** - Don't skip ANY horizontal line that contains data
-    4. **Look for continuation indicators** - Tables may extend beyond obvious boundaries
-    5. **Check for subtotals, totals, and summary rows** - These are data rows too!
-    
-    Determine the table's layout and structure:
-    a) **Standard Layout:** Headers are in the top row, and data records are in subsequent rows.
-    b) **Transposed Layout:** Headers are in the first column, and data records are in subsequent columns.  
-    c) **Complex Structure:** The table contains merged cells, nested headers, or hierarchical organization.
-    d) **Dense Financial Layout:** Multi-level headers, grouped columns, rotated text, and dense numerical data typical of financial reports.
-    
-    **⚠️ ROW EXTRACTION CHECKPOINTS:**
-    - Did I scan the ENTIRE vertical space of the table?
-    - Are there any faint lines or subtle row separators I missed?
-    - Do I have continuation rows that might be formatted differently?
-    - Are there summary/total rows at the bottom that I need to include?
+    **Step 1: Table Analysis**
+    - Identify the complete table boundary (top, bottom, left, right edges)
+    - Count total rows visually BEFORE extraction
+    - Determine table layout: Standard (headers top), Transposed (headers left), or Complex structure
+    - Note any merged cells, multi-level headers, or rotated text
 
-    **Step 2: Handle Complex Cell Structures and Dense Data**
-    Pay special attention to these common patterns in financial/technical tables:
-    
-    - **Rotated/Vertical Text Headers:** Text that appears rotated 90° should be read and included as column headers.
-    
-    - **Multi-Level Column Groups:** When columns are grouped under parent headers (like "1 USD / KHR" spanning multiple sub-columns), create descriptive combined headers.
-      - Example: "1 USD / KHR" + "Profit Loss" = "1 USD KHR Profit Loss"
-    
-    - **Merged Header Cells:** When a header spans multiple columns, create meaningful combined names rather than repetition.
-      - Better: ["Company", "USD Profit", "USD Loss", "KHR Profit", "KHR Loss"] 
-      - Avoid: ["Company", "Currency", "Currency", "Currency", "Currency"]
-    
-    - **Merged Data Cells:** When a data cell spans multiple columns/rows, repeat the value in each position it occupies.
-    
-    - **Dense Numerical Data:** Handle parentheses indicating negative numbers, commas in large numbers, and decimal precision carefully.
-    
-    - **Row Headers with Categories:** When left-most columns contain categorical data (like company names, industry types), preserve these exactly.
-    
-    - **Empty/Dash Cells:** Distinguish between truly empty cells, cells with dashes (-), and cells that are part of merged ranges.
+    **Step 2: Systematic Extraction**
+    - Extract headers first, creating meaningful combined names for grouped headers
+    - Extract data rows sequentially from top to bottom
+    - Include ALL rows: data, subtotals, totals, summary rows
+    - Maintain exact numerical formatting (commas, decimals, parentheses)
+    - For unclear numbers, use [UNCLEAR] rather than guessing
 
-    **Step 3: SYSTEMATIC ROW-BY-ROW EXTRACTION**
-    
-    **🎯 COMPLETE ROW EXTRACTION PROTOCOL:**
-    
-    **Phase 1: ROW INVENTORY**
-    - Count all visible rows in the table (including headers, data, subtotals, totals)
-    - Note any rows that might be partially visible or cut off
-    - Identify rows with different formatting (bold, italic, indented)
-    - Mark rows that span multiple lines or have wrapped text
-    
-    **Phase 2: SEQUENTIAL EXTRACTION**
-    - **Extract Row 1:** Headers (create meaningful combined names for grouped headers)
-    - **Extract Row 2:** First data row (verify column count matches headers)
-    - **Extract Row 3:** Second data row (verify alignment)
-    - **Continue systematically:** Extract EVERY subsequent row without exception
-    - **Include ALL special rows:** Subtotals, category breaks, summary rows, footnote references
-    
-    **Phase 3: EXTRACTION BY LAYOUT TYPE**
-    - **If Standard Layout:** Row-by-row extraction, maintaining perfect column alignment
-    - **If Transposed Layout:** Un-pivot while ensuring no columns (original rows) are missed
-    - **If Complex/Dense Structure:**
-      1. Map all column boundaries across the ENTIRE table height
-      2. Extract each row systematically, ensuring no row is skipped
-      3. Handle wrapped text and multi-line entries as single rows
-      4. Preserve special formatting indicators
-    
-    **🚨 ROW COMPLETENESS VERIFICATION:**
-    - **Before finishing:** Count extracted rows vs. visually counted rows
-    - **If counts don't match:** Re-scan for missed rows
-    - **Check bottom of table:** Often contains critical summary data
-    - **Verify no rows were accidentally merged or skipped**
+    **Step 3: Quality Assurance**
+    - Verify row count matches visual inspection
+    - Ensure all columns have consistent data types
+    - Double-check numerical accuracy
+    - Maintain proper column alignment
 
-    **Step 4: Special Handling for Financial Tables - NUMERICAL ACCURACY IS CRITICAL**
-    
-    **⚠️ ABSOLUTE PRIORITY: NUMERICAL ACCURACY ⚠️**
-    - **EVERY NUMBER MUST BE EXTRACTED EXACTLY AS SHOWN** - No approximations, no rounding, no guessing
-    - **Double-check every digit** - A single incorrect digit can invalidate financial data
-    - **If uncertain about a number, mark it clearly rather than guessing**
-    - **Verify decimal places, commas, and parentheses precisely**
-    
-    Specific formatting rules:
-    - **Currency Symbols:** Preserve currency information in headers or data as appropriate
-    - **Negative Numbers:** Extract parenthetical negatives EXACTLY: "(1,250)" should remain "(1,250)" unless context clearly requires conversion
-    - **Large Numbers:** Preserve comma separators EXACTLY as shown: "1,250,000" not "1250000"
-    - **Decimal Precision:** Maintain exact decimal places: "1.50" not "1.5", "0.001" not ".001"
-    - **Percentage Values:** Keep percentage symbols and exact decimal precision where they appear
-    - **Date Formats:** Maintain original date formatting exactly
-    - **Company/Entity Names:** Extract full company names even if they span multiple lines in the image
-    
-    **NUMERICAL VERIFICATION CHECKLIST:**
-    ✓ Every digit matches the source exactly
-    ✓ All commas, decimals, and parentheses are preserved
-    ✓ No numbers are accidentally transposed or approximated
-    ✓ Negative indicators (parentheses, minus signs) are captured correctly
+    **Output Format:**
+    Return a single, valid JSON object with these keys:
+    - "table_data": List of lists (first = headers, rest = data rows)
+    - "confidence_score": 0.0 to 1.0 score
+    - "reasoning": Description of extraction approach
+    - "structure_notes": Notes on table complexity
+    - "numerical_accuracy_notes": Confirmation of numerical precision
 
-    **Step 5: COMPREHENSIVE DATA QUALITY ASSURANCE**
-    
-    **🎯 ZERO TOLERANCE FOR MISSING ROWS OR INCORRECT NUMBERS:**
-    
-    **ROW COMPLETENESS REQUIREMENTS:**
-    - **EVERY visible row must be extracted** - No exceptions, no shortcuts
-    - **Total extracted rows must match visual count** - Recount if necessary
-    - **Include header rows, data rows, subtotal rows, total rows, and any footnote rows**
-    - **Don't skip rows with different formatting** (bold, italic, indented, highlighted)
-    - **Extract continued/wrapped rows as single entries**
-    - **Capture partial rows** if they contain any data
-    
-    **NUMERICAL PRECISION REQUIREMENTS:**
-    - Every row must have the same number of columns as the header row
-    - **ALL NUMBERS MUST BE PIXEL-PERFECT ACCURATE** - Treat each number as if millions of dollars depend on it
-    - **NEVER estimate or approximate numerical values** - If you cannot read a number clearly, mark it as "[UNCLEAR]" rather than guess
-    - **Maintain exact formatting:** Preserve commas, decimals, parentheses, and spacing exactly as shown
-    - **Cross-verify large numbers:** For numbers with 4+ digits, double-check each digit sequence
-    - Maintain consistent data types within columns (all numbers, all text, etc.)
-    - No empty cells unless the original data is genuinely empty
-    - When multiple header levels exist, create clear, descriptive combined column names
-    - Ensure row labels/identifiers are properly captured from leftmost columns
-    
-    **MANDATORY VERIFICATION CHECKLIST:**
-    ✓ Row count matches visual inspection
-    ✓ Every number is digit-perfect accurate
-    ✓ All formatting (commas, decimals, parentheses) preserved
-    ✓ No rows accidentally merged or skipped
-    ✓ Headers properly reflect hierarchical structure
-    ✓ Column alignment maintained across all rows
-
-    **Step 6: Final JSON Output - WITH NUMERICAL ACCURACY GUARANTEE**
-    Return a single, valid JSON object with these five keys: "table_data", "confidence_score", "reasoning", "structure_notes", and "numerical_accuracy_notes".
-
-    - **`table_data`**: MUST be a list of lists in standard format. First inner list = headers, subsequent lists = data rows. Every row must have identical column count. **ALL NUMERICAL VALUES MUST BE EXACTLY AS SHOWN IN SOURCE.**
-    - **`confidence_score`**: Score from 0.0 to 1.0 reflecting extraction accuracy and completeness. **Reduce score significantly if any numbers were unclear or estimated.**
-    - **`reasoning`**: Describe the layout detected and extraction approach used.
-    - **`structure_notes`**: Document merged cells, grouped headers, rotated text, and complex formatting encountered.
-    - **`numerical_accuracy_notes`**: **MANDATORY FIELD** - Explicitly confirm that all numbers were extracted with 100% accuracy, or note any numbers that were unclear/estimated with [UNCLEAR] markers.
-
-    **Example for Dense Financial Table with Perfect Numerical Accuracy:**
-    Original complex structure with grouped headers:
-    ```
-    |           | 1 USD / KHR        | Exchange Rate |
-    | Company   | Profit | Loss      | Current       |
-    | ABC Bank  | 1,250  | (500)     | 4,100.25      |
-    | XYZ Corp  | 15,875 | (2,100.5) | 4,099.80      |
-    ```
-    
-    Your output should be:
+    **Example Output:**
     ```json
     {
       "table_data": [
-        ["Company", "1 USD KHR Profit", "1 USD KHR Loss", "Exchange Rate Current"],
-        ["ABC Bank", "1,250", "(500)", "4,100.25"],
-        ["XYZ Corp", "15,875", "(2,100.5)", "4,099.80"]
+        ["Company", "Revenue", "Profit", "Loss"],
+        ["ABC Corp", "1,250,000", "125,000", "(15,000)"],
+        ["XYZ Inc", "2,100,500", "310,200", "(25,500)"]
       ],
-      "structure_notes": "Detected grouped headers with '1 USD / KHR' spanning two sub-columns",
-      "numerical_accuracy_notes": "All numerical values extracted with 100% accuracy - verified each digit, decimal place, and formatting symbol"
+      "confidence_score": 0.95,
+      "reasoning": "Standard table layout with clear headers and numerical data",
+      "structure_notes": "Simple 4-column table with financial data",
+      "numerical_accuracy_notes": "All numbers extracted with 100% accuracy"
     }
     ```
 
-    **FINAL CRITICAL REMINDER:**
-    🚨 **FINANCIAL DATA ACCURACY IS NON-NEGOTIABLE** 🚨
-    - A single wrong digit can cause massive financial miscalculations
-    - Take extra time to verify each number rather than rushing
-    - When in doubt about a digit, use [UNCLEAR] rather than guessing
-    - Your numerical accuracy directly impacts financial decisions and compliance
-
-    **Critical Instructions for Dense Tables - NUMBERS ABOVE ALL:**
-    1. **🎯 NUMERICAL ACCURACY IS THE TOP PRIORITY** - Everything else is secondary
-    2. Read ALL text carefully, including rotated or small text, but TRIPLE-CHECK all numbers
-    3. Identify column boundaries precisely - dense tables often have narrow spacing
-    4. Create meaningful, unique column headers that capture the hierarchical structure
-    5. **Verify every single digit in every number** - Use systematic left-to-right verification
-    6. Extract every visible data point - dense tables contain valuable information in every cell
-    7. **If any number is unclear, mark as [UNCLEAR] rather than estimate**
-
-    **ZERO-ERROR NUMERICAL EXTRACTION PROTOCOL:**
-    - Scan each number multiple times before recording
-    - Pay attention to number formatting patterns (commas every 3 digits, decimal precision)
-    - Verify negative indicators are correctly captured
-    - Cross-reference similar numbers to check for consistency in formatting
-    - Remember: Perfect accuracy on 90% of numbers is better than 95% accuracy on 100% of numbers
-
-    Your top priority is complete, accurate extraction with **PERFECT NUMERICAL PRECISION** and meaningful column headers that reflect the table's hierarchical structure.
+    Remember: Numerical accuracy is critical for financial data. Take time to verify each number.
     """
 
 # --- AI Extraction Functions ---
+def extract_table_with_claude(base64_image_data, api_key, model_name):
+    """Extracts table data using Anthropic Claude API with improved error handling."""
+    
+    if not api_key:
+        return None, 0.0, "❌ Claude API key not configured."
+
+    if not base64_image_data:
+        return None, 0.0, "❌ Base64 image data is missing or corrupt."
+
+    # Updated model names - these are the correct Claude model identifiers
+    allowed_models = [
+        "claude-3-5-sonnet-20241022",  # Latest Claude 3.5 Sonnet
+        "claude-3-5-sonnet-20240620",  # Previous Claude 3.5 Sonnet
+        "claude-3-opus-20240229",      # Claude 3 Opus
+        "claude-3-sonnet-20240229",    # Claude 3 Sonnet
+        "claude-3-haiku-20240307"      # Claude 3 Haiku
+    ]
+    
+    if model_name not in allowed_models:
+        return None, 0.0, f"❌ Invalid model name. Available models: {', '.join(allowed_models)}"
+
+    prompt = create_layout_aware_prompt()
+
+    try:
+        # Initialize Claude client
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        st.info(f"🤖 Sending request to Claude ({model_name})...")
+
+        # Create the message
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=8192,
+            temperature=0.1,  # Low temperature for consistent extraction
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": base64_image_data
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+        )
+
+        # Extract the response text
+        raw_text = response.content[0].text.strip()
+        
+        # Debug output (optional - can be removed in production)
+        with st.expander("🔍 Claude Raw Response (Debug)"):
+            st.code(raw_text[:1500], language="json")
+
+        # Clean JSON response (remove markdown code blocks if present)
+        if raw_text.startswith("```json"):
+            raw_text = raw_text.strip()[7:-3].strip()
+        elif raw_text.startswith("```"):
+            # Handle generic code blocks
+            lines = raw_text.strip().split('\n')
+            if len(lines) > 2:
+                raw_text = '\n'.join(lines[1:-1]).strip()
+
+        try:
+            # Parse the JSON response
+            parsed_json = json.loads(raw_text)
+            
+            # Extract required fields with defaults
+            table_data = parsed_json.get("table_data", [])
+            confidence_score = parsed_json.get("confidence_score", 0.0)
+            reasoning = parsed_json.get("reasoning", "No reasoning provided.")
+            
+            # Additional validation
+            if not table_data:
+                return None, 0.0, "❌ No table data found in response"
+            
+            if len(table_data) < 2:
+                return table_data, confidence_score, f"⚠️ Only {len(table_data)} row(s) extracted. {reasoning}"
+            
+            return table_data, confidence_score, reasoning
+            
+        except json.JSONDecodeError as e:
+            return None, 0.0, f"⚠️ Claude returned invalid JSON: {str(e)[:200]}..."
+
+    except anthropic.APIError as e:
+        return None, 0.0, f"❌ Claude API error: {str(e)}"
+    except Exception as e:
+        return None, 0.0, f"❌ Unexpected error: {str(e)}"
+
 def extract_table_with_gemini(base64_image_data, api_key, model_name):
     """Extracts table data using Google Gemini API."""
     if not api_key:
@@ -246,8 +204,19 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
 
     prompt = create_layout_aware_prompt()
 
-    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}, {"inlineData": {"mimeType": "image/png", "data": base64_image_data}}] }], "generationConfig": {"responseMimeType": "application/json"}}
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": "image/png", "data": base64_image_data}}
+            ]
+        }],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+    
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    
     try:
         response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
         response.raise_for_status()
@@ -258,68 +227,6 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
     except Exception as e:
         return None, 0.0, f"Extraction failed: {str(e)}"
 
-def extract_table_with_claude(base64_image_data, api_key, model_name):
-    """Extracts table data using Anthropic Claude 3.5 API with improved safety and debug output."""
-
-    if not api_key:
-        return None, 0.0, "❌ Claude API key not configured."
-
-    if not base64_image_data:
-        return None, 0.0, "❌ Base64 image data is missing or corrupt."
-
-    # Enforce correct model name
-    allowed_models = ["claude-3-5-sonnet-20240620", "claude-3-7-sonnet-20250219"]
-    if model_name not in allowed_models:
-        return None, 0.0, f"❌ Invalid model name. Please select one of: {', '.join(allowed_models)}"
-
-    prompt = create_layout_aware_prompt()
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-
-        response = client.messages.create(
-            model=model_name,
-            max_tokens=8192,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": base64_image_data
-                        }},
-                        {"type": "text", "text": prompt}
-                    ]
-                }
-            ]
-        )
-
-        raw_text = response.content[0].text.strip()
-
-        # Debug output
-        st.markdown("### 🤖 Claude Raw Output")
-        st.code(raw_text[:2000], language="markdown")  # Show first 2000 chars
-
-        # Remove code fences if present
-        if raw_text.startswith("```json"):
-            raw_text = raw_text.strip()[7:-3].strip()
-
-        try:
-            parsed_json = json.loads(raw_text)
-            return (
-                parsed_json.get("table_data", []),
-                parsed_json.get("confidence_score", 0.0),
-                parsed_json.get("reasoning", "No reasoning provided.")
-            )
-        except json.JSONDecodeError:
-            return None, 0.0, f"⚠️ Claude returned non-JSON output: {raw_text[:300]}..."
-
-    except Exception as e:
-        return None, 0.0, f"❌ Claude API error: {str(e)}"
-
-
-# --- NEW: Function to handle OpenAI extraction ---
 def extract_table_with_openai(base64_image_data, api_key, model_name):
     """Extracts table data using OpenAI GPT-4 API."""
     if not api_key:
@@ -356,7 +263,6 @@ def extract_table_with_openai(base64_image_data, api_key, model_name):
     except Exception as e:
         return None, 0.0, f"API error: {str(e)}"
 
-
 def to_excel(df):
     """Converts a DataFrame to an in-memory Excel file."""
     output = BytesIO()
@@ -368,7 +274,7 @@ def to_excel(df):
 load_dotenv()
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-openai_api_key = os.getenv("OPENAI_API_KEY") # Added for OpenAI
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
 st.title("Step 2: 🔎 AI-Powered Table Extractor")
 
@@ -379,13 +285,31 @@ else:
 
     # AI Configuration
     st.header("⚙️ AI Configuration")
-    # --- MODIFIED: Added OpenAI models to the list ---
+    
+    # Updated model options with correct Claude model names
     model_options = [
-        "gpt-4o", "gpt-4-turbo", # OpenAI Models
-        "claude-3-5-sonnet-20240620", "claude-3-7-sonnet-20250219", # Anthropic Models
-        "gemini-2.5-pro", "gemini-2.5-flash" # Google Models
+        # OpenAI Models
+        "gpt-4o", "gpt-4-turbo",
+        # Anthropic Claude Models (CORRECTED)
+        "claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620", 
+        "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
+        # Google Models
+        "gemini-1.5-pro", "gemini-1.5-flash"
     ]
+    
     selected_model = st.selectbox("Choose AI Model:", options=model_options)
+    
+    # Show API key status
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        openai_status = "✅ Configured" if openai_api_key else "❌ Missing"
+        st.info(f"**OpenAI:** {openai_status}")
+    with col2:
+        claude_status = "✅ Configured" if anthropic_api_key else "❌ Missing"
+        st.info(f"**Claude:** {claude_status}")
+    with col3:
+        gemini_status = "✅ Configured" if gemini_api_key else "❌ Missing"
+        st.info(f"**Gemini:** {gemini_status}")
 
     st.divider()
 
@@ -405,7 +329,7 @@ else:
 
         with col2:
             if st.button("Extract Table from Image", type="primary"):
-                # --- MODIFIED: Added logic for OpenAI provider ---
+                # Determine AI provider and function
                 if "gemini" in selected_model:
                     ai_provider = "Google Gemini"
                     api_key_to_use = gemini_api_key
@@ -414,7 +338,7 @@ else:
                     ai_provider = "Anthropic Claude"
                     api_key_to_use = anthropic_api_key
                     extraction_function = extract_table_with_claude
-                elif "gpt" in selected_model: # Logic for OpenAI
+                elif "gpt" in selected_model:
                     ai_provider = "OpenAI"
                     api_key_to_use = openai_api_key
                     extraction_function = extract_table_with_openai
@@ -423,11 +347,12 @@ else:
                     st.stop()
 
                 if not api_key_to_use:
-                    st.warning(f"Please add your {ai_provider} API Key to the .env file.")
+                    st.error(f"❌ {ai_provider} API Key is not configured. Please add it to your .env file.")
                 else:
                     with st.spinner(f"🤖 {ai_provider} is analyzing the image with **{selected_model}**. Please wait..."):
                         start_time = time.time()
 
+                        # Prepare image and extract
                         base64_image = prepare_image_from_pil(selected_pil_image)
                         if base64_image:
                             table_data, confidence, reasoning = extraction_function(base64_image, api_key_to_use, selected_model)
@@ -448,10 +373,10 @@ else:
                                 header, data = table_data[0], table_data[1:]
                                 st.session_state.extracted_df = pd.DataFrame(data, columns=header)
                                 st.session_state.original_df = st.session_state.extracted_df.copy()
-                                st.success(f"✅ Table extracted successfully in {st.session_state.processing_time:.1f} seconds!")
+                                st.success(f"✅ Table extracted successfully in {processing_time:.1f} seconds!")
                                 st.info("✅ Data is ready! Please proceed to the **🤖 Validator** page.")
                             except Exception as e:
-                                st.error(f"Data Mismatch Error: {e}. Trying to load without a header.")
+                                st.warning(f"Data structure issue: {e}. Loading without strict header matching.")
                                 st.session_state.extracted_df = pd.DataFrame(table_data)
                                 st.session_state.original_df = st.session_state.extracted_df.copy()
                         elif table_data:
@@ -459,16 +384,18 @@ else:
                             st.session_state.extracted_df = pd.DataFrame(table_data)
                             st.session_state.original_df = st.session_state.extracted_df.copy()
                         else:
-                            st.error("The AI could not find a table in the image.")
+                            st.error("❌ The AI could not find a table in the image.")
+                            st.error(reasoning)  # Show the error reasoning
                             st.session_state.extracted_df = None
                             st.session_state.original_df = None
 
-    # --- Display Single Image Results ---
+    # Display Results
     if st.session_state.get('confidence') is not None:
         st.subheader("📊 Extraction Results")
 
         col1, col2, col3 = st.columns(3)
         with col1:
+            confidence_color = "normal" if st.session_state.confidence >= 0.8 else "inverse"
             st.metric(label="Confidence Score", value=f"{st.session_state.confidence:.1%}")
         with col2:
             st.metric(label="Processing Time", value=f"{st.session_state.processing_time:.1f}s")
@@ -483,12 +410,15 @@ else:
             - **Provider:** {st.session_state.get('ai_provider', 'N/A')}
             """)
 
-    # Data Display and Download for single image
+    # Data Display and Download
     if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
         st.divider()
-        st.subheader("Extracted Data Preview")
+        st.subheader("📋 Extracted Data Preview")
         clean_df = normalize_dataframe(st.session_state.extracted_df)
-        st.dataframe(clean_df)
+        st.dataframe(clean_df, use_container_width=True)
+
+        # Show data summary
+        st.markdown(f"**Data Summary:** {len(clean_df)} rows × {len(clean_df.columns)} columns")
 
         st.divider()
         st.subheader("📥 Download Extracted Data")
@@ -501,11 +431,11 @@ else:
 
         if file_name:
             if file_format == "Excel (.xlsx)":
-                file_data = to_excel(st.session_state.extracted_df)
+                file_data = to_excel(clean_df)
                 file_extension = "xlsx"
                 mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             else:
-                file_data = st.session_state.extracted_df.to_csv(index=False).encode('utf-8')
+                file_data = clean_df.to_csv(index=False).encode('utf-8')
                 file_extension = "csv"
                 mime_type = "text/csv"
 
