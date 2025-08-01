@@ -1,18 +1,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import cv2
-import base64
 import json
 import anthropic
+import openai
 import requests
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from dataclasses import dataclass
 from enum import Enum
+import warnings
+warnings.filterwarnings('ignore')
 
 class ValidationSeverity(Enum):
     CRITICAL = "critical"
@@ -27,108 +28,193 @@ class ValidationResult:
     message: str
     details: Dict[str, Any] = None
     suggested_fix: str = None
+    auto_fixable: bool = False
 
-class TableValidator:
-    def __init__(self, anthropic_api_key: str = None, gemini_api_key: str = None):
+class SmartTableValidator:
+    def __init__(self, anthropic_api_key: str = None, gemini_api_key: str = None, openai_api_key: str = None):
         self.anthropic_api_key = anthropic_api_key
         self.gemini_api_key = gemini_api_key
-        self.validation_results = []
+        self.openai_api_key = openai_api_key
+        self.validation_cache = {}
         
-    def create_ai_validation_prompt(self, df: pd.DataFrame, original_image_b64: str = None) -> str:
-        """Creates a comprehensive prompt for AI-based validation."""
+    def quick_health_check(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Lightning-fast initial assessment of data quality."""
+        total_cells = len(df) * len(df.columns)
+        missing_cells = df.isnull().sum().sum()
+        
+        # Quick metrics
+        health_score = max(0, 1 - (missing_cells / total_cells) * 2)
+        
+        issues = []
+        if missing_cells > total_cells * 0.3:
+            issues.append("High missing data")
+        if len(df.columns) != len(set(df.columns)):
+            issues.append("Duplicate columns")
+        if df.duplicated().sum() > len(df) * 0.1:
+            issues.append("Many duplicates")
+            
+        return {
+            "health_score": health_score,
+            "critical_issues": issues,
+            "completeness": 1 - (missing_cells / total_cells),
+            "shape_quality": "good" if len(df) > 0 and len(df.columns) > 0 else "poor"
+        }
+    
+    def smart_type_detection(self, df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+        """Intelligent data type detection with confidence scores."""
+        type_suggestions = {}
+        
+        for col in df.columns:
+            series = df[col].dropna()
+            if len(series) == 0:
+                continue
+                
+            suggestions = {
+                'current': str(df[col].dtype),
+                'recommended': None,
+                'confidence': 0.0,
+                'sample_values': series.head(3).tolist(),
+                'issues': []
+            }
+            
+            # Convert to string for analysis
+            str_series = series.astype(str)
+            
+            # Check for numeric
+            numeric_converted = pd.to_numeric(series, errors='coerce')
+            numeric_ratio = numeric_converted.notna().sum() / len(series)
+            
+            # Check for dates
+            date_patterns = [
+                (r'^\d{4}-\d{2}-\d{2}$', 'YYYY-MM-DD'),
+                (r'^\d{1,2}/\d{1,2}/\d{4}$', 'MM/DD/YYYY'),
+                (r'^\d{1,2}-\d{1,2}-\d{4}$', 'MM-DD-YYYY'),
+            ]
+            
+            date_matches = 0
+            detected_pattern = None
+            for pattern, format_name in date_patterns:
+                matches = str_series.str.match(pattern, na=False).sum()
+                if matches > date_matches:
+                    date_matches = matches
+                    detected_pattern = format_name
+            
+            date_ratio = date_matches / len(series)
+            
+            # Determine best type
+            if numeric_ratio > 0.9:
+                if numeric_converted.notna().sum() > 0:
+                    if (numeric_converted % 1 == 0).all():
+                        suggestions['recommended'] = 'integer'
+                    else:
+                        suggestions['recommended'] = 'float'
+                    suggestions['confidence'] = numeric_ratio
+            elif date_ratio > 0.8:
+                suggestions['recommended'] = 'datetime'
+                suggestions['confidence'] = date_ratio
+                suggestions['date_format'] = detected_pattern
+            elif df[col].dtype == 'object':
+                suggestions['recommended'] = 'string'
+                suggestions['confidence'] = 1.0
+            
+            # Add issues
+            if numeric_ratio > 0.5 and numeric_ratio < 0.9:
+                suggestions['issues'].append(f"Mixed numeric/text ({numeric_ratio:.1%} numeric)")
+            if len(series.unique()) == 1:
+                suggestions['issues'].append("All values identical")
+            if len(series.unique()) / len(series) > 0.95:
+                suggestions['issues'].append("Mostly unique values")
+                
+            type_suggestions[col] = suggestions
+        
+        return type_suggestions
+    
+    def create_smart_ai_prompt(self, df: pd.DataFrame, type_analysis: Dict) -> str:
+        """Creates an optimized prompt for AI validation."""
+        sample_data = df.head(10).to_dict('records')
+        
         return f"""
-        You are an expert data quality analyst. Analyze the extracted table data and provide a comprehensive validation report.
+        Analyze this extracted table data for quality and suggest improvements:
 
-        **Table Structure:**
-        - Rows: {len(df)}
-        - Columns: {len(df.columns)}
-        - Column Names: {list(df.columns)}
+        **STRUCTURE:** {len(df)} rows × {len(df.columns)} columns
+        **COLUMNS:** {list(df.columns)}
+        
+        **TYPE ANALYSIS:**
+        {json.dumps({k: {
+            'current': v['current'],
+            'recommended': v['recommended'], 
+            'confidence': v['confidence'],
+            'issues': v['issues']
+        } for k, v in type_analysis.items()}, indent=2)}
 
-        **Sample Data (first 5 rows):**
-        {df.head().to_string()}
+        **SAMPLE DATA (first 10 rows):**
+        {json.dumps(sample_data, indent=2, default=str)}
 
-        **Data Types:**
-        {df.dtypes.to_string()}
-
-        **Task: Perform comprehensive validation and return a JSON response with the following structure:**
+        Return JSON with:
         {{
-            "overall_quality_score": 0.0-1.0,
-            "issues_found": [
+            "quality_score": 0.0-1.0,
+            "extraction_issues": [
                 {{
-                    "type": "data_type_mismatch|missing_values|formatting_error|logical_inconsistency|structural_issue",
+                    "type": "ocr_error|alignment_issue|missing_header|wrong_datatype",
                     "severity": "critical|warning|info",
-                    "column": "column_name_or_null",
-                    "description": "detailed description",
-                    "affected_rows": [row_indices],
-                    "suggested_fix": "specific recommendation"
+                    "column": "column_name",
+                    "description": "brief issue description",
+                    "auto_fix": "specific pandas code to fix" or null,
+                    "manual_review": true/false
+                }}
+            ],
+            "transformation_suggestions": [
+                {{
+                    "operation": "convert_types|clean_text|parse_dates|fill_missing",
+                    "columns": ["col1", "col2"],
+                    "method": "specific method",
+                    "benefit": "why this helps"
                 }}
             ],
             "data_insights": {{
-                "potential_data_types": {{"column_name": "suggested_type"}},
-                "patterns_detected": ["list of patterns found"],
-                "anomalies": ["list of anomalies"],
-                "completeness_score": 0.0-1.0
-            }},
-            "extraction_quality": {{
-                "table_structure_correct": true/false,
-                "headers_properly_extracted": true/false,
-                "data_alignment_issues": true/false,
-                "ocr_quality_estimate": 0.0-1.0
-            }},
-            "recommendations": [
-                {{
-                    "action": "specific action to take",
-                    "priority": "high|medium|low",
-                    "impact": "description of impact"
-                }}
-            ]
+                "potential_relationships": ["col1 correlates with col2"],
+                "outliers_detected": ["unusual values in col3"],
+                "patterns": ["dates follow YYYY-MM-DD format"]
+            }}
         }}
-
-        Focus on:
-        1. Data type consistency and appropriateness
-        2. Missing or null values and their patterns
-        3. Formatting inconsistencies (dates, numbers, text)
-        4. Logical relationships between columns
-        5. Potential OCR extraction errors
-        6. Structural integrity of the table
         """
 
-    def validate_with_ai(self, df: pd.DataFrame, model: str = "claude-3-5-sonnet-20240620", 
-                        original_image_b64: str = None) -> Dict[str, Any]:
-        """Uses AI to perform intelligent validation of the extracted table."""
-        prompt = self.create_ai_validation_prompt(df, original_image_b64)
+    def validate_with_ai(self, df: pd.DataFrame, model: str, type_analysis: Dict) -> Dict[str, Any]:
+        """Optimized AI validation with better error handling."""
+        prompt = self.create_smart_ai_prompt(df, type_analysis)
         
         try:
             if "claude" in model and self.anthropic_api_key:
                 client = anthropic.Anthropic(api_key=self.anthropic_api_key)
                 message = client.messages.create(
                     model=model,
-                    max_tokens=4096,
-                    messages=[{
-                        "role": "user", 
-                        "content": [{"type": "text", "text": prompt}]
-                    }]
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}]
                 )
                 response_text = message.content[0].text
                 
+            elif "gpt" in model and self.openai_api_key:
+                client = openai.OpenAI(api_key=self.openai_api_key)
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=4000
+                )
+                response_text = response.choices[0].message.content
+                
             elif "gemini" in model and self.gemini_api_key:
                 payload = {
-                    "contents": [{
-                        "role": "user",
-                        "parts": [{"text": prompt}]
-                    }],
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                     "generationConfig": {"responseMimeType": "application/json"}
                 }
                 api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.gemini_api_key}"
-                response = requests.post(api_url, headers={'Content-Type': 'application/json'}, 
-                                       json=payload, timeout=120)
+                response = requests.post(api_url, json=payload, timeout=60)
                 response.raise_for_status()
-                result = response.json()
-                response_text = result['candidates'][0]['content']['parts'][0]['text']
+                response_text = response.json()['candidates'][0]['content']['parts'][0]['text']
             else:
-                return {"error": "No valid API key or model specified"}
+                return {"error": "No valid API key configured"}
             
-            # Clean potential markdown formatting
+            # Clean response
             if response_text.strip().startswith("```json"):
                 response_text = response_text.strip()[7:-3].strip()
             
@@ -137,329 +223,306 @@ class TableValidator:
         except Exception as e:
             return {"error": f"AI validation failed: {str(e)}"}
 
-    def validate_data_types(self, df: pd.DataFrame) -> List[ValidationResult]:
-        """Validates data types and suggests improvements."""
-        results = []
+class DataTransformer:
+    """Handles all data transformation operations."""
+    
+    @staticmethod
+    def auto_convert_types(df: pd.DataFrame, type_suggestions: Dict) -> pd.DataFrame:
+        """Automatically converts columns to suggested types."""
+        df_transformed = df.copy()
+        conversion_log = []
         
-        for col in df.columns:
-            # Check for mixed data types
-            if df[col].dtype == 'object':
-                numeric_count = sum(pd.to_numeric(df[col], errors='coerce').notna())
-                total_count = len(df[col].dropna())
+        for col, suggestion in type_suggestions.items():
+            if suggestion['confidence'] > 0.8 and suggestion['recommended']:
+                try:
+                    if suggestion['recommended'] == 'integer':
+                        df_transformed[col] = pd.to_numeric(df_transformed[col], errors='coerce').astype('Int64')
+                        conversion_log.append(f"✅ {col} → integer")
+                    elif suggestion['recommended'] == 'float':
+                        df_transformed[col] = pd.to_numeric(df_transformed[col], errors='coerce')
+                        conversion_log.append(f"✅ {col} → float")
+                    elif suggestion['recommended'] == 'datetime':
+                        df_transformed[col] = pd.to_datetime(df_transformed[col], errors='coerce')
+                        conversion_log.append(f"✅ {col} → datetime")
+                except Exception as e:
+                    conversion_log.append(f"❌ {col} conversion failed: {str(e)}")
+        
+        return df_transformed, conversion_log
+    
+    @staticmethod
+    def smart_missing_value_handler(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+        """Intelligently handles missing values based on column type and pattern."""
+        df_filled = df.copy()
+        fill_log = []
+        
+        for col in df_filled.columns:
+            missing_count = df_filled[col].isnull().sum()
+            if missing_count == 0:
+                continue
                 
-                if total_count > 0:
-                    numeric_ratio = numeric_count / total_count
-                    
-                    if numeric_ratio > 0.8:
-                        results.append(ValidationResult(
-                            check_name="Data Type Consistency",
-                            severity=ValidationSeverity.WARNING,
-                            message=f"Column '{col}' appears to be mostly numeric but stored as text",
-                            details={"numeric_ratio": numeric_ratio},
-                            suggested_fix=f"Convert column '{col}' to numeric type"
-                        ))
+            if df_filled[col].dtype in ['int64', 'float64', 'Int64']:
+                # Use median for numeric columns
+                fill_value = df_filled[col].median()
+                df_filled[col].fillna(fill_value, inplace=True)
+                fill_log.append(f"📊 {col}: filled {missing_count} missing with median ({fill_value})")
+            elif df_filled[col].dtype == 'datetime64[ns]':
+                # Forward fill for dates
+                df_filled[col].fillna(method='ffill', inplace=True)
+                fill_log.append(f"📅 {col}: forward filled {missing_count} missing dates")
+            else:
+                # Mode for categorical
+                mode_value = df_filled[col].mode()
+                if len(mode_value) > 0:
+                    df_filled[col].fillna(mode_value[0], inplace=True)
+                    fill_log.append(f"📝 {col}: filled {missing_count} missing with mode ('{mode_value[0]}')")
         
-        return results
+        return df_filled, fill_log
+    
+    @staticmethod
+    def clean_text_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+        """Cleans text columns by removing extra spaces, standardizing case."""
+        df_clean = df.copy()
+        clean_log = []
+        
+        text_cols = df_clean.select_dtypes(include=['object']).columns
+        
+        for col in text_cols:
+            original_values = df_clean[col].notna().sum()
+            
+            # Remove extra whitespace
+            df_clean[col] = df_clean[col].astype(str).str.strip().str.replace(r'\s+', ' ', regex=True)
+            
+            # Handle common OCR errors
+            df_clean[col] = df_clean[col].str.replace('O', '0', regex=False).replace('l', '1', regex=False)
+            
+            clean_log.append(f"🧹 {col}: cleaned text formatting")
+        
+        return df_clean, clean_log
 
-    def validate_missing_values(self, df: pd.DataFrame) -> List[ValidationResult]:
-        """Analyzes missing value patterns."""
-        results = []
-        
-        missing_summary = df.isnull().sum()
-        total_rows = len(df)
-        
-        for col, missing_count in missing_summary.items():
-            if missing_count > 0:
-                missing_ratio = missing_count / total_rows
-                
-                if missing_ratio > 0.5:
-                    severity = ValidationSeverity.CRITICAL
-                elif missing_ratio > 0.2:
-                    severity = ValidationSeverity.WARNING
-                else:
-                    severity = ValidationSeverity.INFO
-                
-                results.append(ValidationResult(
-                    check_name="Missing Values",
-                    severity=severity,
-                    message=f"Column '{col}' has {missing_count} missing values ({missing_ratio:.1%})",
-                    details={"missing_count": missing_count, "missing_ratio": missing_ratio},
-                    suggested_fix="Review extraction quality or fill missing values appropriately"
-                ))
-        
-        return results
-
-    def validate_duplicates(self, df: pd.DataFrame) -> List[ValidationResult]:
-        """Checks for duplicate rows and unusual patterns."""
-        results = []
-        
-        duplicate_rows = df.duplicated().sum()
-        if duplicate_rows > 0:
-            results.append(ValidationResult(
-                check_name="Duplicate Detection",
-                severity=ValidationSeverity.WARNING,
-                message=f"Found {duplicate_rows} duplicate rows",
-                details={"duplicate_count": duplicate_rows},
-                suggested_fix="Remove duplicates or verify if they are legitimate"
-            ))
-        
-        return results
-
-    def validate_format_consistency(self, df: pd.DataFrame) -> List[ValidationResult]:
-        """Validates format consistency within columns."""
-        results = []
-        
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                values = df[col].dropna().astype(str)
-                
-                # Check for date-like patterns
-                date_patterns = [
-                    r'\d{1,2}/\d{1,2}/\d{4}',
-                    r'\d{4}-\d{2}-\d{2}',
-                    r'\d{1,2}-\d{1,2}-\d{4}'
-                ]
-                
-                for pattern in date_patterns:
-                    matches = values.str.match(pattern).sum()
-                    if matches > len(values) * 0.7:  # 70% match threshold
-                        results.append(ValidationResult(
-                            check_name="Format Consistency",
-                            severity=ValidationSeverity.INFO,
-                            message=f"Column '{col}' appears to contain dates",
-                            details={"pattern": pattern, "matches": matches},
-                            suggested_fix=f"Consider converting column '{col}' to datetime"
-                        ))
-                        break
-        
-        return results
-
-    def create_validation_report(self, df: pd.DataFrame, ai_results: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Creates a comprehensive validation report."""
-        
-        # Traditional validation checks
-        traditional_results = []
-        traditional_results.extend(self.validate_data_types(df))
-        traditional_results.extend(self.validate_missing_values(df))
-        traditional_results.extend(self.validate_duplicates(df))
-        traditional_results.extend(self.validate_format_consistency(df))
-        
-        # Combine with AI results
-        report = {
-            "basic_stats": {
-                "total_rows": len(df),
-                "total_columns": len(df.columns),
-                "memory_usage": df.memory_usage(deep=True).sum(),
-                "completeness": (1 - df.isnull().sum().sum() / (len(df) * len(df.columns)))
-            },
-            "traditional_validation": [
-                {
-                    "check_name": result.check_name,
-                    "severity": result.severity.value,
-                    "message": result.message,
-                    "details": result.details or {},
-                    "suggested_fix": result.suggested_fix
-                } for result in traditional_results
-            ],
-            "ai_validation": ai_results or {}
-        }
-        
-        return report
-
-# Streamlit UI for the validator
 def main():
-    st.title("Step 3: 🤖 AI-Powered Table Validator")
+    st.set_page_config(page_title="Smart Table Validator", layout="wide")
+    st.title("Step 3: 🤖 Smart Table Validator & Transformer")
     
-    # Check if we have extracted data
+    # Check prerequisites
     if 'extracted_df' not in st.session_state or st.session_state.extracted_df is None:
-        st.warning("⚠️ Please extract a table first using the **🔎 AI-Powered Table Extractor**.")
-        return
+        st.error("⚠️ No table data found. Please extract a table first using the **🔎 AI-Powered Table Extractor**.")
+        st.stop()
     
-    df = st.session_state.extracted_df
+    df = st.session_state.extracted_df.copy()
     
     # Initialize validator
-    validator = TableValidator(
+    validator = SmartTableValidator(
         anthropic_api_key=st.session_state.get('anthropic_api_key'),
-        gemini_api_key=st.session_state.get('gemini_api_key')
+        gemini_api_key=st.session_state.get('gemini_api_key'),
+        openai_api_key=st.session_state.get('openai_api_key')
     )
     
-    st.header("📊 Data Overview")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Rows", len(df))
-    with col2:
-        st.metric("Columns", len(df.columns))
-    with col3:
-        st.metric("Missing Values", df.isnull().sum().sum())
-    with col4:
-        completeness = (1 - df.isnull().sum().sum() / (len(df) * len(df.columns))) * 100
-        st.metric("Completeness", f"{completeness:.1f}%")
-    
-    # Display the data
-    st.subheader("🔍 Current Data")
-    st.dataframe(df, use_container_width=True)
-    
-    # Validation controls
-    st.header("🛠️ Validation Controls")
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        validation_mode = st.selectbox(
-            "Choose Validation Mode:",
-            ["Quick Traditional Validation", "AI-Enhanced Validation", "Comprehensive Validation"]
-        )
-    
-    with col2:
-        if st.button("🚀 Run Validation", type="primary"):
-            with st.spinner("Running validation..."):
-                
-                if validation_mode == "Quick Traditional Validation":
-                    report = validator.create_validation_report(df)
-                    
-                elif validation_mode == "AI-Enhanced Validation":
-                    ai_results = validator.validate_with_ai(df)
-                    report = validator.create_validation_report(df, ai_results)
-                    
-                else:  # Comprehensive
-                    ai_results = validator.validate_with_ai(df)
-                    report = validator.create_validation_report(df, ai_results)
-                
-                st.session_state.validation_report = report
-                st.success("✅ Validation completed!")
-    
-    # Display validation results
-    if 'validation_report' in st.session_state:
-        report = st.session_state.validation_report
+    # === QUICK HEALTH CHECK ===
+    with st.container():
+        st.header("🏥 Quick Health Check")
         
-        st.header("📋 Validation Results")
+        health_check = validator.quick_health_check(df)
         
-        # Basic statistics
-        st.subheader("📈 Basic Statistics")
-        stats = report['basic_stats']
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total Rows", stats['total_rows'])
+            score_color = "green" if health_check['health_score'] > 0.8 else "orange" if health_check['health_score'] > 0.6 else "red"
+            st.metric("Health Score", f"{health_check['health_score']:.1%}", 
+                     delta=f"{score_color}")
         with col2:
-            st.metric("Total Columns", stats['total_columns'])
+            st.metric("Data Shape", f"{len(df)} × {len(df.columns)}")
         with col3:
-            st.metric("Memory Usage", f"{stats['memory_usage'] / 1024:.1f} KB")
+            st.metric("Completeness", f"{health_check['completeness']:.1%}")
         with col4:
-            st.metric("Completeness", f"{stats['completeness']:.1%}")
+            st.metric("Critical Issues", len(health_check['critical_issues']))
         
-        # Traditional validation results
-        if report['traditional_validation']:
-            st.subheader("🔧 Traditional Validation Issues")
-            
-            for issue in report['traditional_validation']:
-                severity = issue['severity']
-                if severity == 'critical':
-                    st.error(f"**{issue['check_name']}**: {issue['message']}")
-                elif severity == 'warning':
-                    st.warning(f"**{issue['check_name']}**: {issue['message']}")
-                else:
-                    st.info(f"**{issue['check_name']}**: {issue['message']}")
+        if health_check['critical_issues']:
+            st.warning("⚠️ Critical Issues: " + ", ".join(health_check['critical_issues']))
+    
+    # === SMART TYPE ANALYSIS ===
+    st.header("🔍 Smart Type Analysis")
+    
+    if st.button("🚀 Run Smart Analysis", type="primary"):
+        with st.spinner("Analyzing data types and patterns..."):
+            type_analysis = validator.smart_type_detection(df)
+            st.session_state.type_analysis = type_analysis
+    
+    if 'type_analysis' in st.session_state:
+        type_analysis = st.session_state.type_analysis
+        
+        # Display type recommendations
+        st.subheader("📋 Type Recommendations")
+        
+        recommendations_data = []
+        for col, analysis in type_analysis.items():
+            recommendations_data.append({
+                'Column': col,
+                'Current Type': analysis['current'],
+                'Recommended': analysis['recommended'] or 'No change',
+                'Confidence': f"{analysis['confidence']:.1%}",
+                'Issues': ', '.join(analysis['issues']) if analysis['issues'] else 'None',
+                'Sample': ', '.join(map(str, analysis['sample_values'][:2]))
+            })
+        
+        recommendations_df = pd.DataFrame(recommendations_data)
+        st.dataframe(recommendations_df, use_container_width=True)
+        
+        # === AI VALIDATION ===
+        st.header("🤖 AI-Enhanced Validation")
+        
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            ai_model = st.selectbox(
+                "Select AI Model for Deep Analysis:",
+                ["claude-3-5-sonnet-20240620", "gpt-4o", "gpt-4-turbo", "gemini-2.5-pro"]
+            )
+        
+        with col2:
+            if st.button("🔬 Deep AI Analysis"):
+                with st.spinner(f"Running AI analysis with {ai_model}..."):
+                    ai_results = validator.validate_with_ai(df, ai_model, type_analysis)
+                    st.session_state.ai_results = ai_results
+        
+        # === TRANSFORMATION TOOLS ===
+        st.header("⚡ Smart Transformations")
+        
+        transformer = DataTransformer()
+        
+        transform_options = st.columns(3)
+        
+        with transform_options[0]:
+            if st.button("🔄 Auto-Convert Types", help="Automatically convert columns to optimal types"):
+                with st.spinner("Converting data types..."):
+                    transformed_df, log = transformer.auto_convert_types(df, type_analysis)
+                    st.session_state.transformed_df = transformed_df
+                    st.session_state.transform_log = log
+                    st.success("✅ Types converted!")
+                    for entry in log:
+                        st.write(entry)
+        
+        with transform_options[1]:
+            if st.button("🔧 Smart Fill Missing", help="Intelligently fill missing values"):
+                current_df = st.session_state.get('transformed_df', df)
+                with st.spinner("Filling missing values..."):
+                    filled_df, log = transformer.smart_missing_value_handler(current_df)
+                    st.session_state.transformed_df = filled_df
+                    st.success("✅ Missing values handled!")
+                    for entry in log:
+                        st.write(entry)
+        
+        with transform_options[2]:
+            if st.button("🧹 Clean Text", help="Clean and standardize text columns"):
+                current_df = st.session_state.get('transformed_df', df)
+                with st.spinner("Cleaning text..."):
+                    cleaned_df, log = transformer.clean_text_columns(current_df)
+                    st.session_state.transformed_df = cleaned_df
+                    st.success("✅ Text cleaned!")
+                    for entry in log:
+                        st.write(entry)
+    
+    # === RESULTS COMPARISON ===
+    if 'transformed_df' in st.session_state:
+        st.header("📊 Before vs After Comparison")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🔴 Original Data")
+            st.dataframe(df.head(10), use_container_width=True)
+            st.caption(f"Shape: {df.shape}, Missing: {df.isnull().sum().sum()}")
+        
+        with col2:
+            st.subheader("🟢 Transformed Data")
+            transformed_df = st.session_state.transformed_df
+            st.dataframe(transformed_df.head(10), use_container_width=True)
+            st.caption(f"Shape: {transformed_df.shape}, Missing: {transformed_df.isnull().sum().sum()}")
+        
+        # Quality improvement metrics
+        original_missing = df.isnull().sum().sum()
+        new_missing = transformed_df.isnull().sum().sum()
+        improvement = max(0, (original_missing - new_missing) / max(original_missing, 1))
+        
+        st.metric("Quality Improvement", f"{improvement:.1%}", 
+                 delta=f"Reduced {original_missing - new_missing} missing values")
+        
+        # === EXPORT OPTIONS ===
+        st.header("📥 Export Transformed Data")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            filename = st.text_input("Filename", value="validated_table")
+        
+        with col2:
+            export_format = st.selectbox("Format", ["Excel (.xlsx)", "CSV (.csv)", "JSON (.json)"])
+        
+        with col3:
+            if st.button("📄 Export Data", type="primary"):
+                if export_format == "Excel (.xlsx)":
+                    from io import BytesIO
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        transformed_df.to_excel(writer, index=False, sheet_name='Validated_Data')
+                    data = output.getvalue()
+                    mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    file_ext = "xlsx"
+                elif export_format == "CSV (.csv)":
+                    data = transformed_df.to_csv(index=False).encode('utf-8')
+                    mime_type = "text/csv"
+                    file_ext = "csv"
+                else:  # JSON
+                    data = transformed_df.to_json(orient='records', indent=2).encode('utf-8')
+                    mime_type = "application/json"
+                    file_ext = "json"
                 
-                if issue['suggested_fix']:
-                    st.caption(f"💡 Suggested fix: {issue['suggested_fix']}")
+                st.download_button(
+                    label=f"⬇️ Download {export_format}",
+                    data=data,
+                    file_name=f"{filename}.{file_ext}",
+                    mime=mime_type
+                )
+    
+    # === AI RESULTS DISPLAY ===
+    if 'ai_results' in st.session_state and 'error' not in st.session_state.ai_results:
+        st.header("🧠 AI Analysis Results")
         
-        # AI validation results
-        if report.get('ai_validation') and 'overall_quality_score' in report['ai_validation']:
-            ai_report = report['ai_validation']
-            
-            st.subheader("🤖 AI Validation Analysis")
-            
-            # Overall quality score
-            quality_score = ai_report.get('overall_quality_score', 0)
-            st.metric("Overall Quality Score", f"{quality_score:.1%}")
-            
-            # Quality gauge
+        ai_results = st.session_state.ai_results
+        
+        # Quality score with gauge
+        if 'quality_score' in ai_results:
             fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=quality_score * 100,
+                mode="gauge+number+delta",
+                value=ai_results['quality_score'] * 100,
                 domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Data Quality Score"},
+                title={'text': "AI Quality Score"},
+                delta={'reference': 80},
                 gauge={
                     'axis': {'range': [None, 100]},
                     'bar': {'color': "darkblue"},
                     'steps': [
-                        {'range': [0, 50], 'color': "lightgray"},
-                        {'range': [50, 80], 'color': "yellow"},
-                        {'range': [80, 100], 'color': "green"}
+                        {'range': [0, 60], 'color': "lightgray"},
+                        {'range': [60, 85], 'color': "yellow"},
+                        {'range': [85, 100], 'color': "green"}
                     ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': 90
-                    }
+                    'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': 90}
                 }
             ))
             fig.update_layout(height=300)
             st.plotly_chart(fig, use_container_width=True)
-            
-            # Issues found by AI
-            if ai_report.get('issues_found'):
-                st.subheader("🚨 AI-Detected Issues")
-                for issue in ai_report['issues_found']:
-                    severity = issue.get('severity', 'info')
-                    if severity == 'critical':
-                        st.error(f"**{issue['type']}**: {issue['description']}")
-                    elif severity == 'warning':
-                        st.warning(f"**{issue['type']}**: {issue['description']}")
-                    else:
-                        st.info(f"**{issue['type']}**: {issue['description']}")
-                    
-                    if issue.get('suggested_fix'):
-                        st.caption(f"💡 {issue['suggested_fix']}")
-            
-            # Recommendations
-            if ai_report.get('recommendations'):
-                st.subheader("💡 AI Recommendations")
-                for rec in ai_report['recommendations']:
-                    priority = rec.get('priority', 'medium')
-                    priority_emoji = {'high': '🔥', 'medium': '⚠️', 'low': 'ℹ️'}.get(priority, 'ℹ️')
-                    st.write(f"{priority_emoji} **{rec['action']}** ({rec.get('priority', 'medium')} priority)")
-                    if rec.get('impact'):
-                        st.caption(f"Impact: {rec['impact']}")
         
-        # Data cleaning suggestions
-        st.header("🧹 Data Cleaning Tools")
-        
-        cleaning_options = st.multiselect(
-            "Select cleaning operations to apply:",
-            [
-                "Remove duplicate rows",
-                "Fill missing values with forward fill",
-                "Convert numeric columns",
-                "Standardize text case",
-                "Remove leading/trailing spaces"
-            ]
-        )
-        
-        if cleaning_options and st.button("Apply Cleaning Operations"):
-            cleaned_df = df.copy()
-            
-            for operation in cleaning_options:
-                if operation == "Remove duplicate rows":
-                    cleaned_df = cleaned_df.drop_duplicates()
-                elif operation == "Fill missing values with forward fill":
-                    cleaned_df = cleaned_df.fillna(method='ffill')
-                elif operation == "Convert numeric columns":
-                    for col in cleaned_df.columns:
-                        if cleaned_df[col].dtype == 'object':
-                            numeric_converted = pd.to_numeric(cleaned_df[col], errors='coerce')
-                            if not numeric_converted.isna().all():
-                                cleaned_df[col] = numeric_converted
-                elif operation == "Standardize text case":
-                    for col in cleaned_df.select_dtypes(include=['object']).columns:
-                        cleaned_df[col] = cleaned_df[col].astype(str).str.title()
-                elif operation == "Remove leading/trailing spaces":
-                    for col in cleaned_df.select_dtypes(include=['object']).columns:
-                        cleaned_df[col] = cleaned_df[col].astype(str).str.strip()
-            
-            st.session_state.cleaned_df = cleaned_df
-            st.success("✅ Cleaning operations applied!")
-            st.subheader("🔄 Cleaned Data Preview")
-            st.dataframe(cleaned_df, use_container_width=True)
+        # Issues and suggestions
+        if 'extraction_issues' in ai_results:
+            st.subheader("🚨 Detected Issues")
+            for issue in ai_results['extraction_issues']:
+                severity = issue.get('severity', 'info')
+                if severity == 'critical':
+                    st.error(f"**{issue['type']}** in {issue.get('column', 'table')}: {issue['description']}")
+                elif severity == 'warning':
+                    st.warning(f"**{issue['type']}** in {issue.get('column', 'table')}: {issue['description']}")
+                else:
+                    st.info(f"**{issue['type']}** in {issue.get('column', 'table')}: {issue['description']}")
+                
+                if issue.get('auto_fix'):
+                    st.code(f"Auto-fix: {issue['auto_fix']}")
 
 if __name__ == "__main__":
     main()
