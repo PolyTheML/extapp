@@ -461,9 +461,9 @@ else:
         # Recommended Claude models (best for large tables)
         "claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620", "claude-3-opus-20240229",
         # Other models
-        "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
+        "claude-opus-4-20250514	", "claude-sonnet-4-20250514",
         "gpt-4o", "gpt-4-turbo",
-        "gemini-1.5-pro", "gemini-1.5-flash"
+        "gemini-2.5-pro", "gemini-2.5-flash"
     ]
     
     selected_model = st.selectbox("Choose AI Model:", options=model_options)
