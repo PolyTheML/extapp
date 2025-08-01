@@ -49,7 +49,7 @@ def create_layout_aware_prompt():
     return """
     You are an expert data analyst specializing in complex financial and technical table extraction. Your primary task is to analyze the provided image, identify the main data table, and extract its contents with high precision, paying special attention to its orientation, cell structure, data density, and **COMPLETE ROW EXTRACTION**.
 
-    **🚨 MISSION CRITICAL REQUIREMENTS 🚨**
+    **🚨 MISSION CRITICAL REQUIREMENTS �**
     1. **EXTRACT EVERY SINGLE ROW** - Missing rows = Complete failure
     2. **NUMERICAL ACCURACY IS ABSOLUTE** - Every digit must be perfect
     3. **NO ROW LEFT BEHIND** - Scan systematically from top to bottom
@@ -259,23 +259,64 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
         return None, 0.0, f"Extraction failed: {str(e)}"
 
 def extract_table_with_claude(base64_image_data, api_key, model_name):
-    """Extracts table data using Anthropic Claude API."""
+    """Extracts table data using Anthropic Claude 3.5 API with improved safety and debug output."""
+
     if not api_key:
-        return None, 0.0, "API key not configured."
+        return None, 0.0, "❌ Claude API key not configured."
+
+    if not base64_image_data:
+        return None, 0.0, "❌ Base64 image data is missing or corrupt."
+
+    # Enforce correct model name
+    if "claude" in model_name.lower():
+        model_name = "claude-3-5-sonnet-20240620"
 
     prompt = create_layout_aware_prompt()
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(model=model_name, max_tokens=4096, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64_image_data}}, {"type": "text", "text": prompt}]}])
-        json_response_text = message.content[0].text
-        # Clean potential markdown code fences
-        if json_response_text.strip().startswith("```json"):
-            json_response_text = json_response_text.strip()[7:-3].strip()
-        parsed_json = json.loads(json_response_text)
-        return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
+
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=4096,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": base64_image_data
+                        }},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ]
+        )
+
+        raw_text = response.content[0].text.strip()
+
+        # Debug output
+        st.markdown("### 🤖 Claude Raw Output")
+        st.code(raw_text[:2000], language="markdown")  # Show first 2000 chars
+
+        # Remove code fences if present
+        if raw_text.startswith("```json"):
+            raw_text = raw_text.strip()[7:-3].strip()
+
+        try:
+            parsed_json = json.loads(raw_text)
+            return (
+                parsed_json.get("table_data", []),
+                parsed_json.get("confidence_score", 0.0),
+                parsed_json.get("reasoning", "No reasoning provided.")
+            )
+        except json.JSONDecodeError:
+            return None, 0.0, f"⚠️ Claude returned non-JSON output: {raw_text[:300]}..."
+
     except Exception as e:
-        return None, 0.0, f"API error: {str(e)}"
+        return None, 0.0, f"❌ Claude API error: {str(e)}"
+
 
 # --- NEW: Function to handle OpenAI extraction ---
 def extract_table_with_openai(base64_image_data, api_key, model_name):
