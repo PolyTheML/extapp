@@ -183,7 +183,7 @@ def extract_table_with_claude_enhanced(base64_image_data, api_key, model_name):
         # Show cleaned response for debugging
         with st.expander("🔍 Claude Response Analysis"):
             st.write(f"**Raw length:** {len(raw_text)} chars")
-            st.write(f"**Cleaned length:" {len(cleaned_text)} chars")
+            st.write(f"**Cleaned length:** {len(cleaned_text)} chars")
             st.code(cleaned_text[:2000], language="json")
             
             # Try to identify why JSON might be failing
