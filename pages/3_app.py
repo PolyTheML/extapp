@@ -145,10 +145,30 @@ def extract_table_with_claude_enhanced(base64_image_data, api_key, model_name):
         
         st.info(f"🤖 Claude ({model_name}) is analyzing the complete table...")
 
-        # Enhanced message creation with higher token limit
+        # Enhanced message creation with maximum token limit
+        # Claude models support different max tokens:
+        # - Claude 3.5 Sonnet: up to 8192 output tokens
+        # - Claude 3 Opus: up to 4096 output tokens  
+        # - Claude 3 Haiku: up to 4096 output tokens
+        max_tokens_config = {
+            "claude-3-5-sonnet-20241022": 8192,
+            "claude-3-5-sonnet-20240620": 8192,
+            "claude-3-opus-20240229": 4096,
+            "claude-3-sonnet-20240229": 4096,
+            "claude-3-haiku-20240307": 4096
+        }
+        
+        max_tokens = max_tokens_config.get(model_name, 8192)
+        
+        # Use custom tokens if set by user
+        if hasattr(st.session_state, 'custom_max_tokens'):
+            max_tokens = st.session_state.custom_max_tokens
+            
+        st.info(f"🔧 Using {max_tokens} max tokens for {model_name}")
+        
         response = client.messages.create(
             model=model_name,
-            max_tokens=8192,  # Maximum tokens for complete extraction
+            max_tokens=max_tokens,  # Use maximum available tokens for the model
             temperature=0.0,  # Zero temperature for consistency
             messages=[
                 {
@@ -257,6 +277,79 @@ def clean_json_response(raw_text):
     
     return text.strip()
 
+def to_excel(df):
+    """Converts a DataFrame to an in-memory Excel file."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
+
+def extract_table_with_gemini(base64_image_data, api_key, model_name):
+    """Extracts table data using Google Gemini API."""
+    if not api_key:
+        return None, 0.0, "API key not configured."
+
+    prompt = create_comprehensive_extraction_prompt()
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": "image/png", "data": base64_image_data}}
+            ]
+        }],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+    
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    
+    try:
+        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        json_response_text = result['candidates'][0]['content']['parts'][0]['text']
+        parsed_json = json.loads(json_response_text)
+        return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
+    except Exception as e:
+        return None, 0.0, f"Extraction failed: {str(e)}"
+
+def extract_table_with_openai(base64_image_data, api_key, model_name):
+    """Extracts table data using OpenAI GPT-4 API."""
+    if not api_key:
+        return None, 0.0, "API key not configured."
+
+    prompt = create_comprehensive_extraction_prompt()
+
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image_data}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=4096,
+        )
+        json_response_text = response.choices[0].message.content
+        # Clean potential markdown code fences
+        if json_response_text.strip().startswith("```json"):
+            json_response_text = json_response_text.strip()[7:-3].strip()
+        parsed_json = json.loads(json_response_text)
+        return parsed_json.get("table_data", []), parsed_json.get("confidence_score", 0.0), parsed_json.get("reasoning", "No reasoning provided.")
+    except Exception as e:
+        return None, 0.0, f"API error: {str(e)}"
+
 def extract_table_with_claude_fallback(base64_image_data, api_key, model_name):
     """Fallback method for when primary extraction fails - uses chunked approach."""
     
@@ -363,11 +456,22 @@ else:
     
     # Enhanced settings for large tables
     st.subheader("⚙️ Extraction Settings")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         use_fallback = st.checkbox("Enable fallback extraction if first attempt fails", value=True)
     with col2:
         show_debug = st.checkbox("Show detailed debug information", value=True)
+    with col3:
+        # Allow users to customize max tokens
+        if "claude" in selected_model:
+            max_tokens_options = {
+                "Standard (4096)": 4096,
+                "High (8192)": 8192,
+                "Maximum (8192)": 8192  # Claude's current limit
+            }
+            selected_tokens = st.selectbox("Max Tokens:", options=list(max_tokens_options.keys()), index=2)
+            custom_max_tokens = max_tokens_options[selected_tokens]
+            st.session_state.custom_max_tokens = custom_max_tokens
 
     image_options = {f"Image {i+1}": i for i in range(len(st.session_state.converted_pil_images))}
     if image_options:
