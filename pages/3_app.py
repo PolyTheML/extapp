@@ -160,8 +160,8 @@ def validate_uploaded_image(uploaded_file) -> tuple[bool, str]:
             return False, "Image too small. Please upload images at least 100x100 pixels."
         
         # Check maximum dimensions (will be resized if needed)
-        if width > 8000 or height > 8000:
-            return False, "Image too large. Please upload images smaller than 8000x8000 pixels."
+        if width > 80000 or height > 80000:
+            return False, "Image too large. Please upload images smaller than 80000x80000 pixels."
         
         return True, f"Valid image: {width}x{height} pixels, {uploaded_file.size/1024:.1f} KB"
     
