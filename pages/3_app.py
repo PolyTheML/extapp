@@ -211,7 +211,7 @@ def prepare_image_from_pil(pil_image):
     """Resizes, encodes, and prepares a PIL image for API requests."""
     try:
         img_cv = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-        max_dim = 20000; h, w, _ = img_cv.shape
+        max_dim = 3000; h, w, _ = img_cv.shape
         if h > max_dim or w > max_dim:
             if h > w: new_h, new_w = max_dim, int(w * (max_dim / h))
             else: new_h, new_w = int(h * (max_dim / w)), max_dim
