@@ -2,6 +2,7 @@ import streamlit as st
 import fitz  # PyMuPDF
 import io
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+Image.MAX_IMAGE_PIXELS = None
 import cv2
 import numpy as np
 from skimage import restoration, filters, morphology, exposure
