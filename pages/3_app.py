@@ -333,6 +333,8 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
             "gemini-2.5-flash-lite": "gemini-2.0-flash-exp",
             "gemini-2.0-flash-exp": "gemini-2.0-flash-exp", 
             "gemini-2.0-flash-lite": "gemini-2.0-flash-exp"
+            "gemini-2.5-pro": "gemini-2.5-pro",
+            "gemini-2.5-flash": "gemini-2.5-flash"
         }
         
         actual_model = model_mapping.get(model_name, "gemini-2.0-flash-exp")
@@ -348,6 +350,13 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
         pil_image = PILImage.open(io.BytesIO(image_data))
         
         prompt = create_optimized_financial_extraction_prompt()
+
+        generation_config = genai.GenerationConfig(
+            temperature=0.0,  # Keep deterministic for financial data
+            max_output_tokens=8192,  # Gemini handles dynamic token allocation
+            top_p=1.0,
+            top_k=32
+        )
         
         # Generate content with image
         response = model.generate_content([
@@ -441,6 +450,8 @@ else:
         "claude-3-opus-20240229",
         "claude-opus-4-20250514", 
         "claude-sonnet-4-20250514",
+        "gemini-2.5-pro", 
+        "gemini-2.5-flash",
         "gemini-2.5-flash-lite", 
         "gemini-2.0-flash-exp", 
         "gemini-2.0-flash-lite"
