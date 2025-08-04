@@ -332,7 +332,7 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
         model_mapping = {
             "gemini-2.5-flash-lite": "gemini-2.0-flash-exp",
             "gemini-2.0-flash-exp": "gemini-2.0-flash-exp", 
-            "gemini-2.0-flash-lite": "gemini-2.0-flash-exp"
+            "gemini-2.0-flash-lite": "gemini-2.0-flash-exp",
             "gemini-2.5-pro": "gemini-2.5-pro",
             "gemini-2.5-flash": "gemini-2.5-flash"
         }
