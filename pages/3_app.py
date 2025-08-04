@@ -603,7 +603,7 @@ else:
             if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None:
                 df = st.session_state.extracted_df
                 st.write(f"**Data Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
-                st.write(f"**Column Names:** {', '.join(df.columns.tolist()[:10])}{'...' if len(df.columns) > 10 else ''}")
+                st.write(f"Column Names: {', '.join([str(c) for c in df.columns.tolist()[:10]])}{'...' if len(df.columns) > 10 else ''}")
 
     # Data Display and Download (Enhanced)
     if 'extracted_df' in st.session_state and st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
