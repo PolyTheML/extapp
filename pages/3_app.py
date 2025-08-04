@@ -392,7 +392,7 @@ def extract_table_with_gemini(base64_image_data, api_key, model_name):
     except Exception as e:
         return None, 0.0, f"❌ Gemini API error: {str(e)}"
 
-def clean_json_response(raw_text):
+def clean_json_response(raw_text: str) -> str:
     """Enhanced JSON cleaning function."""
     text = raw_text.strip()
     
@@ -409,6 +409,8 @@ def clean_json_response(raw_text):
     
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
         text = text[start_idx:end_idx+1]
+    
+    text = re.sub(r',\s*]', ']', text)
     
     # Clean up whitespace but preserve structure
     text = re.sub(r'\n\s*', ' ', text)  # Replace newlines with spaces
