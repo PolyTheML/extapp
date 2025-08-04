@@ -142,15 +142,23 @@ def estimate_noise_level(gray_image):
     # Use Laplacian variance as noise estimate
     return cv2.Laplacian(gray_image, cv2.CV_64F).var()
 
+def estimate_memory_usage(width, height, color_channels, num_pages):
+    """Estimate memory usage for high DPI conversions."""
+    bytes_per_pixel = color_channels
+    total_pixels = width * height * num_pages
+    estimated_bytes = total_pixels * bytes_per_pixel
+    estimated_mb = estimated_bytes / (1024 * 1024)
+    return estimated_mb
+
 def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_space="rgb"):
     """
-    Enhanced PDF to PIL conversion with better quality control.
+    Enhanced PDF to PIL conversion with better quality control and high DPI support.
     
     Args:
         pdf_file: Uploaded PDF file
         start_page: Starting page number
         end_page: Ending page number  
-        dpi: Resolution (300+ recommended for OCR)
+        dpi: Resolution (up to 2400 supported)
         color_space: "rgb", "gray", or "auto"
     
     Returns:
@@ -167,13 +175,29 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_spa
             st.error(f"Error: Invalid page range. The PDF has {total_pages} pages.")
             return [], []
 
+        # Memory usage warning for very high DPI
+        if dpi > 1200:
+            sample_page = pdf_document.load_page(0)
+            page_rect = sample_page.rect
+            zoom = dpi / 72.0
+            estimated_width = int(page_rect.width * zoom)
+            estimated_height = int(page_rect.height * zoom)
+            channels = 3 if color_space == "rgb" else 1
+            estimated_mb = estimate_memory_usage(estimated_width, estimated_height, channels, end_page - start_page + 1)
+            
+            if estimated_mb > 500:  # More than 500MB
+                st.warning(f"⚠️ High DPI Warning: Estimated memory usage is {estimated_mb:.0f}MB. This may cause performance issues or memory errors.")
+                if estimated_mb > 2000:  # More than 2GB
+                    st.error(f"🚨 DPI too high: Estimated memory usage is {estimated_mb:.0f}MB. Consider reducing DPI or processing fewer pages.")
+                    return [], []
+
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         for i, page_num in enumerate(range(start_page - 1, end_page)):
             progress = (i + 1) / (end_page - start_page + 1)
             progress_bar.progress(progress)
-            status_text.text(f"Processing page {page_num + 1}...")
+            status_text.text(f"Processing page {page_num + 1} at {dpi} DPI...")
             
             page = pdf_document.load_page(page_num)
             
@@ -182,31 +206,38 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_spa
             mat = fitz.Matrix(zoom, zoom)
             
             # Get pixmap with better quality settings
-            if color_space == "gray":
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
-            elif color_space == "rgb":
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-            else:  # auto
-                # Analyze page content to determine best color space
-                test_pix = page.get_pixmap(matrix=fitz.Matrix(1, 1))
-                if has_meaningful_color(test_pix):
-                    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-                else:
+            try:
+                if color_space == "gray":
                     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
-            
-            # Convert to PIL Image
-            img_data = pix.tobytes("png")
-            pil_image = Image.open(io.BytesIO(img_data))
-            
-            # Analyze quality
-            metrics, suggested_enhancement = analyze_image_quality(pil_image)
-            quality_reports.append({
-                'page': page_num + 1,
-                'metrics': metrics,
-                'suggested_enhancement': suggested_enhancement
-            })
-            
-            pil_images.append(pil_image)
+                elif color_space == "rgb":
+                    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+                else:  # auto
+                    # Analyze page content to determine best color space
+                    test_pix = page.get_pixmap(matrix=fitz.Matrix(1, 1))
+                    if has_meaningful_color(test_pix):
+                        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+                    else:
+                        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+                
+                # Convert to PIL Image
+                img_data = pix.tobytes("png")
+                pil_image = Image.open(io.BytesIO(img_data))
+                
+                # Analyze quality
+                metrics, suggested_enhancement = analyze_image_quality(pil_image)
+                quality_reports.append({
+                    'page': page_num + 1,
+                    'metrics': metrics,
+                    'suggested_enhancement': suggested_enhancement
+                })
+                
+                pil_images.append(pil_image)
+                
+            except Exception as page_error:
+                st.error(f"Error processing page {page_num + 1}: {page_error}")
+                if dpi > 1800:
+                    st.warning(f"Try reducing DPI if you encounter memory issues with very high resolutions.")
+                continue
 
         pdf_document.close()
         progress_bar.empty()
@@ -249,10 +280,25 @@ if uploaded_file is not None:
             end_page_input = st.number_input("End Page", 1, total_pages, min(5, total_pages))
         
         with col2:
-            dpi_input = st.slider(
-                "Image Quality (DPI)", 150, 600, 400, 50, 
-                help="400+ DPI recommended for table extraction. Higher = better quality but larger files."
+            # Enhanced DPI selection with warnings
+            dpi_options = [150, 200, 300, 400, 500, 600, 800, 1000, 1200, 1600, 2000, 2400]
+            dpi_input = st.selectbox(
+                "Image Quality (DPI)", 
+                options=dpi_options,
+                index=3,  # Default to 400 DPI
+                help="Higher DPI = better quality but larger files and more memory usage. 400-600 recommended for most uses. 1200+ for extreme detail."
             )
+            
+            # DPI guidance
+            if dpi_input <= 400:
+                st.success("✅ Good balance of quality and performance")
+            elif dpi_input <= 800:
+                st.info("ℹ️ High quality, larger file sizes")
+            elif dpi_input <= 1600:
+                st.warning("⚠️ Very high quality, significant memory usage")
+            else:
+                st.error("🚨 Extreme quality, may cause memory issues")
+            
             color_space = st.selectbox(
                 "Color Space",
                 ["auto", "rgb", "gray"],
@@ -270,9 +316,15 @@ if uploaded_file is not None:
                     index=1,
                     help="Light: minimal processing, Medium: balanced, Aggressive: maximum enhancement"
                 )
+            
+            # Memory usage estimation
+            if dpi_input > 600:
+                num_pages = end_page_input - start_page_input + 1
+                estimated_mb = estimate_memory_usage(8000, 11000, 3 if color_space == "rgb" else 1, num_pages)  # Rough estimate
+                st.info(f"📊 Estimated memory usage: ~{estimated_mb:.0f}MB for {num_pages} page(s)")
 
         if st.button("🚀 Convert to High-Quality Images", type="primary"):
-            with st.spinner("Converting pages to high-quality images..."):
+            with st.spinner(f"Converting pages to {dpi_input} DPI images..."):
                 pil_images, quality_reports = convert_pdf_to_pil_images(
                     io.BytesIO(pdf_bytes), start_page_input, end_page_input, dpi_input, color_space
                 )
@@ -282,9 +334,12 @@ if uploaded_file is not None:
                     if enable_enhancement:
                         st.info("🔧 Applying image enhancement...")
                         enhanced_images = []
-                        for img in pil_images:
+                        enhancement_progress = st.progress(0)
+                        for idx, img in enumerate(pil_images):
+                            enhancement_progress.progress((idx + 1) / len(pil_images))
                             enhanced_img = enhance_image_quality(img, enhancement_level)
                             enhanced_images.append(enhanced_img)
+                        enhancement_progress.empty()
                         pil_images = enhanced_images
                     
                     # Store in session state
@@ -302,20 +357,23 @@ if uploaded_file is not None:
                         if key in st.session_state:
                             del st.session_state[key]
 
-                    st.success("✅ High-quality conversion complete!")
+                    st.success(f"✅ High-quality conversion complete at {dpi_input} DPI!")
                     
                     # Display quality summary
                     if quality_reports:
                         st.subheader("📊 Quality Analysis")
                         avg_sharpness = np.mean([r['metrics']['sharpness'] for r in quality_reports])
                         avg_noise = np.mean([r['metrics']['noise_level'] for r in quality_reports])
+                        avg_resolution = np.mean([r['metrics']['resolution'][0] * r['metrics']['resolution'][1] for r in quality_reports])
                         
-                        col1, col2, col3 = st.columns(3)
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             st.metric("Average Sharpness", f"{avg_sharpness:.0f}")
                         with col2:
                             st.metric("Average Noise Level", f"{avg_noise:.1f}")
                         with col3:
+                            st.metric("Avg Resolution", f"{avg_resolution/1000000:.1f}MP")
+                        with col4:
                             enhancement_count = sum(1 for r in quality_reports if r['suggested_enhancement'] != 'light')
                             st.metric("Pages Needing Enhancement", f"{enhancement_count}/{len(quality_reports)}")
 
@@ -338,12 +396,16 @@ if st.session_state.get('converted_pil_images'):
         # Quality info if available
         if 'quality_reports' in st.session_state and i < len(st.session_state.quality_reports):
             report = st.session_state.quality_reports[i]
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Sharpness", f"{report['metrics']['sharpness']:.0f}")
             with col2:
                 st.metric("Brightness", f"{report['metrics']['mean_brightness']:.0f}")
             with col3:
+                resolution = report['metrics']['resolution']
+                megapixels = (resolution[0] * resolution[1]) / 1000000
+                st.metric("Resolution", f"{megapixels:.1f}MP")
+            with col4:
                 st.info(f"Suggested: {report['suggested_enhancement']} enhancement")
         
         # Rotation and enhancement controls
