@@ -159,7 +159,7 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_spa
         pdf_file: Uploaded PDF file
         start_page: Starting page number
         end_page: Ending page number  
-        dpi: Resolution (up to 2400 supported)
+        dpi: Resolution (up to 800 supported)
         color_space: "rgb", "gray", or "auto"
     
     Returns:
@@ -176,8 +176,8 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_spa
             st.error(f"Error: Invalid page range. The PDF has {total_pages} pages.")
             return [], []
 
-        # Memory usage warning for very high DPI
-        if dpi > 1200:
+        # Memory usage warning for high DPI (adjusted for max 800)
+        if dpi > 600:
             sample_page = pdf_document.load_page(0)
             page_rect = sample_page.rect
             zoom = dpi / 72.0
@@ -186,11 +186,8 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_spa
             channels = 3 if color_space == "rgb" else 1
             estimated_mb = estimate_memory_usage(estimated_width, estimated_height, channels, end_page - start_page + 1)
             
-            if estimated_mb > 500:  # More than 500MB
-                st.warning(f"⚠️ High DPI Warning: Estimated memory usage is {estimated_mb:.0f}MB. This may cause performance issues or memory errors.")
-                if estimated_mb > 2000:  # More than 2GB
-                    st.error(f"🚨 DPI too high: Estimated memory usage is {estimated_mb:.0f}MB. Consider reducing DPI or processing fewer pages.")
-                    return [], []
+            if estimated_mb > 300:  # Adjusted threshold for 800 DPI max
+                st.warning(f"⚠️ High DPI Warning: Estimated memory usage is {estimated_mb:.0f}MB. This may cause performance issues.")
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -236,8 +233,6 @@ def convert_pdf_to_pil_images(pdf_file, start_page, end_page, dpi=300, color_spa
                 
             except Exception as page_error:
                 st.error(f"Error processing page {page_num + 1}: {page_error}")
-                if dpi > 1800:
-                    st.warning(f"Try reducing DPI if you encounter memory issues with very high resolutions.")
                 continue
 
         pdf_document.close()
@@ -281,24 +276,22 @@ if uploaded_file is not None:
             end_page_input = st.number_input("End Page", 1, total_pages, min(5, total_pages))
         
         with col2:
-            # Enhanced DPI selection with warnings
-            dpi_options = [150, 200, 300, 400, 500, 600, 800, 1000, 1200, 1600, 2000, 2400]
+            # Modified DPI selection - restricted to 800 and below
+            dpi_options = [150, 200, 300, 400, 500, 600, 800]
             dpi_input = st.selectbox(
                 "Image Quality (DPI)", 
                 options=dpi_options,
                 index=3,  # Default to 400 DPI
-                help="Higher DPI = better quality but larger files and more memory usage. 400-600 recommended for most uses. 1200+ for extreme detail."
+                help="Higher DPI = better quality but larger files. Maximum 800 DPI for optimal performance."
             )
             
-            # DPI guidance
+            # Updated DPI guidance for new range
             if dpi_input <= 400:
                 st.success("✅ Good balance of quality and performance")
-            elif dpi_input <= 800:
-                st.info("ℹ️ High quality, larger file sizes")
-            elif dpi_input <= 1600:
-                st.warning("⚠️ Very high quality, significant memory usage")
-            else:
-                st.error("🚨 Extreme quality, may cause memory issues")
+            elif dpi_input <= 600:
+                st.info("ℹ️ High quality, moderate file sizes")
+            else:  # 700-800
+                st.warning("⚠️ Maximum quality, larger file sizes")
             
             color_space = st.selectbox(
                 "Color Space",
@@ -306,7 +299,7 @@ if uploaded_file is not None:
                 help="Auto detects optimal color space. RGB preserves colors, Gray reduces file size."
             )
         
-        # Advanced settings
+        # Advanced settings - updated for new DPI range
         with st.expander("🔧 Advanced Settings"):
             enable_enhancement = st.checkbox("Enable Image Enhancement", value=True, 
                                            help="Applies AI-powered image enhancement for better OCR")
@@ -318,8 +311,8 @@ if uploaded_file is not None:
                     help="Light: minimal processing, Medium: balanced, Aggressive: maximum enhancement"
                 )
             
-            # Memory usage estimation
-            if dpi_input > 600:
+            # Memory usage estimation - updated for max 800 DPI
+            if dpi_input > 500:
                 num_pages = end_page_input - start_page_input + 1
                 estimated_mb = estimate_memory_usage(8000, 11000, 3 if color_space == "rgb" else 1, num_pages)  # Rough estimate
                 st.info(f"📊 Estimated memory usage: ~{estimated_mb:.0f}MB for {num_pages} page(s)")
